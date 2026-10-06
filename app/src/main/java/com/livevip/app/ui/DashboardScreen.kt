@@ -12,12 +12,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -28,10 +29,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.livevip.app.core.FitMode
 import com.livevip.app.core.StreamState
+import com.livevip.app.data.Orientation
 import com.livevip.app.data.StreamProfile
 import com.livevip.app.engine.LiveStreamingEngine
 import com.livevip.app.engine.StreamStats
 
+/**
+ * Stream dashboard: preview + transform controls + REAL live control panel.
+ * Every value shown here comes from the engine state flow, which is owned by
+ * the foreground service, so it stays correct across activity recreation.
+ */
 @Composable
 fun DashboardScreen(
     profile: StreamProfile,
@@ -39,6 +46,7 @@ fun DashboardScreen(
     state: StreamState,
     stats: StreamStats,
     maskedKey: String,
+    validationError: String?,
     onBack: () -> Unit,
     onEdit: () -> Unit,
     onStartLive: () -> Unit,
@@ -52,16 +60,7 @@ fun DashboardScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             TextButton(onClick = onBack) { Text("< STREAMS") }
-            Text(
-                state.label(),
-                color = when (state) {
-                    StreamState.STREAMING -> Color(0xFF4CAF50)
-                    StreamState.ERROR, StreamState.NETWORK_LOST -> MaterialTheme.colorScheme.error
-                    StreamState.IDLE, StreamState.STOPPED -> MaterialTheme.colorScheme.onSurface
-                    else -> Color(0xFFFFC107)
-                },
-                fontWeight = FontWeight.Black
-            )
+            StatusPill(state)
         }
         Text(profile.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Text(profile.summaryLine(), style = MaterialTheme.typography.bodySmall)
@@ -71,73 +70,156 @@ fun DashboardScreen(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(
-                    if (profile.orientation == com.livevip.app.data.Orientation.LANDSCAPE_16_9) 16f / 9f
-                    else 9f / 16f
+                    if (profile.orientation == Orientation.LANDSCAPE_16_9) 16f / 9f else 9f / 16f
                 )
-                .background(Color.Black)
+                .neonGlow(
+                    if (state.isLive) statusColor(state) else MaterialTheme.colorScheme.outline,
+                    cornerRadius = 12.dp,
+                    radius = if (state.isLive) 18.dp else 8.dp
+                )
+                .background(Color.Black, RoundedCornerShape(12.dp))
         ) {
             PreviewSurface(engine, Modifier.fillMaxSize())
         }
 
         Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = {
-                engine.updateComposition { it.copy(fitMode = FitMode.FIT) }
-            }) { Text("FIT") }
-            OutlinedButton(onClick = {
-                engine.updateComposition { it.copy(fitMode = FitMode.FILL) }
-            }) { Text("FILL") }
-            OutlinedButton(onClick = { engine.updateComposition { it.reset() } }) { Text("RESET") }
-            OutlinedButton(onClick = onEdit) { Text("EDIT") }
-        }
+        ResponsiveActions(
+            listOf(
+                "FIT" to { engine.updateComposition { it.copy(fitMode = FitMode.FIT) } },
+                "FILL" to { engine.updateComposition { it.copy(fitMode = FitMode.FILL) } },
+                "RESET" to { engine.updateComposition { it.reset() } },
+                "EDIT" to onEdit
+            )
+        )
 
-        Spacer(Modifier.height(12.dp))
-        if (state.isActive || state == StreamState.ERROR) {
-            Button(
-                onClick = onStopLive,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-            ) { Text("STOP LIVE") }
-        } else {
-            Button(
-                onClick = onStartLive,
-                modifier = Modifier.fillMaxWidth(),
-                enabled = profile.playlist.isNotEmpty()
-            ) { Text("START LIVE") }
-            if (profile.playlist.isEmpty()) {
-                Text(
-                    "Add at least one video before going live.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
-        }
+        Spacer(Modifier.height(14.dp))
+        LiveControlPanel(
+            profile = profile,
+            state = state,
+            stats = stats,
+            maskedKey = maskedKey,
+            validationError = validationError,
+            onStartLive = onStartLive,
+            onStopLive = onStopLive
+        )
 
-        Spacer(Modifier.height(12.dp))
-        Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(12.dp)) {
-                SectionTitle("REAL-TIME (measured values only)")
-                StatRow("State", state.label())
-                StatRow("Elapsed", stats.elapsedLabel())
-                StatRow(
-                    "Max duration",
-                    if (stats.maxDurationMs > 0) StreamStats.formatDuration(stats.maxDurationMs) else "-"
-                )
-                StatRow("Encoder FPS", String.format("%.1f", stats.actualFps))
-                StatRow("Send bitrate", "${stats.bitrateBps / 1000} kbps")
-                StatRow("Sent data", "${stats.bytesSent / 1024} KB")
-                StatRow("Packets sent", "${stats.packetsSent}")
-                StatRow("Loop", "${stats.loopIndex}")
-                StatRow("Playing", stats.currentVideoName)
-                StatRow("Reconnects", "${stats.reconnectCount}")
-                StatRow("Network", stats.networkTransport)
-                StatRow("Server", profile.serverUrl)
-                StatRow("Stream key", maskedKey)
-                stats.lastError?.let { StatRow("Last error", it) }
-            }
-        }
         Spacer(Modifier.height(10.dp))
         TextButton(onClick = onDiagnostics) { Text("OPEN DIAGNOSTICS") }
         Spacer(Modifier.height(30.dp))
     }
+}
+
+@Composable
+private fun LiveControlPanel(
+    profile: StreamProfile,
+    state: StreamState,
+    stats: StreamStats,
+    maskedKey: String,
+    validationError: String?,
+    onStartLive: () -> Unit,
+    onStopLive: () -> Unit
+) {
+    val accent = statusColor(state)
+    Card(
+        Modifier.fillMaxWidth().neonGlow(accent, radius = if (state.isLive) 16.dp else 8.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            SectionTitle("LIVE CONTROL")
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Status", style = MaterialTheme.typography.bodyMedium)
+                StatusPill(state)
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                stats.elapsedLabel(),
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Black,
+                color = accent
+            )
+            Text(
+                "Maximum live: " + StreamStats.formatDuration(
+                    if (stats.maxDurationMs > 0) stats.maxDurationMs
+                    else profile.maxDurationMinutes * 60_000L
+                ),
+                style = MaterialTheme.typography.bodySmall
+            )
+
+            if (state.isActive || state == StreamState.STREAMING) {
+                Spacer(Modifier.height(10.dp))
+                StatRow("Current video", "${stats.currentVideoIndex + 1} / ${maxOf(stats.playlistSize, profile.playlist.size)}")
+                StatRow("Playing", stats.currentVideoName)
+                StatRow("Loop", "${stats.loopIndex} / ${stats.loopTarget}")
+                StatRow("FPS", String.format("%.1f", stats.actualFps))
+                StatRow("Bitrate", "${stats.bitrateBps / 1000} kbps")
+                StatRow("Encoded frames", "${stats.encodedFrames}")
+                StatRow("Dropped frames", "${stats.droppedFrames}")
+                StatRow("Data sent", formatBytes(stats.bytesSent))
+                StatRow("Packets sent", "${stats.packetsSent}")
+                StatRow("Reconnects", "${stats.reconnectCount}")
+                StatRow(
+                    "RTMP",
+                    if (stats.rtmpPublishing) "PUBLISHING" else if (stats.rtmpConnected) "CONNECTED"
+                    else "DISCONNECTED"
+                )
+                StatRow("Audio", if (stats.audioReady) "READY" else "NOT READY")
+                StatRow("Network", stats.networkTransport)
+            } else {
+                Spacer(Modifier.height(6.dp))
+                StatRow("Videos", "${profile.playlist.size}")
+                StatRow("Output", "${profile.resolution} @ ${profile.fps} FPS")
+                StatRow("Bitrate target", "${profile.bitrateKbps} kbps")
+                StatRow("Loop", profile.loopLabel())
+                StatRow("Server", profile.serverUrl)
+                StatRow("Stream key", maskedKey)
+            }
+
+            stats.statusMessage?.let {
+                Spacer(Modifier.height(8.dp))
+                Text(it, color = accent, style = MaterialTheme.typography.bodyMedium)
+            }
+            stats.lastError?.let {
+                Spacer(Modifier.height(8.dp))
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+            validationError?.let {
+                Spacer(Modifier.height(8.dp))
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
+            }
+
+            Spacer(Modifier.height(14.dp))
+            val live = state.isActive
+            if (live) {
+                Button(
+                    onClick = onStopLive,
+                    enabled = state != StreamState.STOPPING,
+                    modifier = Modifier.fillMaxWidth().neonGlow(MaterialTheme.colorScheme.error),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("STOP LIVE", fontWeight = FontWeight.Black) }
+            } else {
+                Button(
+                    onClick = onStartLive,
+                    modifier = Modifier.fillMaxWidth().neonGlow(MaterialTheme.colorScheme.primary, radius = 18.dp)
+                ) { Text("START LIVE", fontWeight = FontWeight.Black) }
+                if (profile.playlist.isEmpty()) {
+                    Text(
+                        "Add at least one video before going live.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L -> String.format("%.2f GB", bytes / 1024.0 / 1024.0 / 1024.0)
+    bytes >= 1024L * 1024L -> String.format("%.2f MB", bytes / 1024.0 / 1024.0)
+    bytes >= 1024L -> String.format("%.1f KB", bytes / 1024.0)
+    else -> "$bytes B"
 }

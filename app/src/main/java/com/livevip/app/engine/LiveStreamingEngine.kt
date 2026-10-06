@@ -8,6 +8,7 @@ import com.livevip.app.core.CompositionState
 import com.livevip.app.core.ErrorCode
 import com.livevip.app.core.FitMode
 import com.livevip.app.core.MasterClock
+import com.livevip.app.core.StreamError
 import com.livevip.app.core.StreamException
 import com.livevip.app.core.StreamState
 import com.livevip.app.data.StreamProfile
@@ -71,6 +72,8 @@ class LiveStreamingEngine(private val context: Context) {
 
     @Volatile var lastError: String? = null
         private set
+    @Volatile var statusMessage: String? = null
+        private set
     @Volatile var currentProfileId: String? = null
         private set
     @Volatile private var currentVideoName: String = "-"
@@ -132,14 +135,55 @@ class LiveStreamingEngine(private val context: Context) {
 
     // ------------------------------------------------------------------- live
 
+    /**
+     * Pre-flight validation. RTMP is never opened unless every required
+     * condition is satisfied; failures surface the exact error code.
+     */
+    fun validate(profile: StreamProfile, streamKey: String): StreamError? {
+        if (profile.playlist.isEmpty() && !profile.useCamera) {
+            return StreamError(ErrorCode.VIDEO_URI_INVALID, "Playlist is empty")
+        }
+        if (profile.resolution.width % 2 != 0 || profile.resolution.height % 2 != 0 ||
+            profile.resolution.width < 128 || profile.resolution.height < 128
+        ) {
+            return StreamError(ErrorCode.UNSUPPORTED_FORMAT, "Output resolution not supported")
+        }
+        val url = profile.serverUrl.trim()
+        if (!url.startsWith("rtmp://") && !url.startsWith("rtmps://")) {
+            return StreamError(ErrorCode.RTMP_URL_INVALID, "Server URL must start with rtmp:// or rtmps://")
+        }
+        if (runCatching { java.net.URI(url).host }.getOrNull().isNullOrBlank()) {
+            return StreamError(ErrorCode.RTMP_URL_INVALID, "Server URL has no host")
+        }
+        if (streamKey.isBlank()) {
+            return StreamError(ErrorCode.STREAM_KEY_MISSING, "Stream key is not set for this profile")
+        }
+        if (profile.microphoneEnabled &&
+            androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.RECORD_AUDIO
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            return StreamError(ErrorCode.AUDIO_INIT_FAILED, "Microphone permission not granted")
+        }
+        return null
+    }
+
     fun startLive(profile: StreamProfile, streamKey: String) {
         if (liveRequested.get()) return
+        validate(profile, streamKey)?.let { error ->
+            lastError = error.toString()
+            log("Pre-flight validation failed: $error")
+            _state.value = StreamState.ERROR
+            publishStats()
+            return
+        }
         this.profile = profile
         this.streamKey = streamKey
         this.currentProfileId = profile.id
         this.maxDurationMs = profile.maxDurationMinutes * 60_000L
         liveRequested.set(true)
         lastError = null
+        statusMessage = null
         reconnect.reset()
         Thread({ prepareAndStart(profile) }, "LiveStart").start()
     }
@@ -147,6 +191,7 @@ class LiveStreamingEngine(private val context: Context) {
     private fun prepareAndStart(profile: StreamProfile) {
         try {
             setState(StreamState.PREPARING)
+            startStatsPump()
             network.start(
                 onAvailable = { log("Network available (${network.transportName})") },
                 onLost = { onNetworkLost("OS reported network loss") }
@@ -324,12 +369,14 @@ class LiveStreamingEngine(private val context: Context) {
                 while (liveRequested.get()) {
                     Thread.sleep(1000)
                     if (maxDurationMs > 0 && clock.elapsedMs() >= maxDurationMs) {
+                        statusMessage = "Maximum live duration reached."
                         log("Maximum live duration reached — stopping gracefully")
                         stopLive(auto = true)
                         return@Thread
                     }
                     val src = videoSource
                     if (src != null && !src.isRunning && _state.value.isActive) {
+                        statusMessage = "Playlist finished."
                         log("Playlist finished — stopping gracefully")
                         stopLive(auto = true)
                         return@Thread
@@ -351,7 +398,9 @@ class LiveStreamingEngine(private val context: Context) {
                 try {
                     Thread.sleep(500)
                     publishStats()
-                    if (!liveRequested.get() && videoSource?.isRunning != true) {
+                    if (!liveRequested.get() && videoSource?.isRunning != true &&
+                        !_state.value.isActive
+                    ) {
                         publishStats()
                         break
                     }
@@ -395,6 +444,13 @@ class LiveStreamingEngine(private val context: Context) {
             loopIndex = src?.loopIndex ?: 0,
             currentVideoIndex = src?.currentIndex ?: 0,
             currentVideoName = currentVideoName,
+            playlistSize = profile?.playlist?.size ?: 0,
+            loopTarget = when (profile?.loopMode) {
+                com.livevip.app.data.LoopMode.UNLIMITED -> "∞"
+                com.livevip.app.data.LoopMode.COUNT -> "${profile?.loopCount}"
+                else -> "1"
+            },
+            statusMessage = statusMessage,
             reconnectCount = reconnect.totalReconnects,
             networkTransport = network.transportName,
             sourceWidth = src?.sourceWidth ?: 0,

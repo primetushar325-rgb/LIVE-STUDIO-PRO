@@ -9,6 +9,7 @@ import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -16,10 +17,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.material3.Surface
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.livevip.app.core.MasterClock
 import com.livevip.app.core.StreamState
+import com.livevip.app.data.AppSettings
 import com.livevip.app.data.ProfileRepository
 import com.livevip.app.data.SecureKeyStore
 import com.livevip.app.data.StreamProfile
@@ -31,11 +32,14 @@ import com.livevip.app.ui.DiagnosticsScreen
 import com.livevip.app.ui.EditProfileScreen
 import com.livevip.app.ui.HomeScreen
 import com.livevip.app.ui.LiveVipTheme
+import com.livevip.app.ui.SettingsScreen
+import com.livevip.app.video.PlaybackEvents
 import com.livevip.app.video.VideoSourceController
 
 /**
  * UI only. The Activity never owns the streaming engine — the foreground
- * service does, so destroying this Activity cannot stop a live broadcast.
+ * service does, so destroying this Activity cannot stop a live broadcast,
+ * and reopening it re-attaches to the real engine state (timer included).
  */
 class MainActivity : ComponentActivity() {
 
@@ -44,6 +48,7 @@ class MainActivity : ComponentActivity() {
         data class Edit(val profile: StreamProfile) : Screen
         data class Dashboard(val profileId: String) : Screen
         data object Diagnostics : Screen
+        data object Settings : Screen
     }
 
     private val permissionLauncher =
@@ -54,11 +59,13 @@ class MainActivity : ComponentActivity() {
         requestRuntimePermissions()
         val repo = ProfileRepository.get(this)
         val engine = LiveStreamingEngine.get(this)
+        val settingsStore = AppSettings.get(this)
 
         setContent {
-            LiveVipTheme {
+            val settings by settingsStore.state.collectAsStateWithLifecycle()
+            LiveVipTheme(settings) {
                 Surface(Modifier) {
-                    AppRoot(repo, engine)
+                    AppRoot(repo, engine, settingsStore)
                 }
             }
         }
@@ -76,23 +83,37 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun AppRoot(repo: ProfileRepository, engine: LiveStreamingEngine) {
+    private fun AppRoot(
+        repo: ProfileRepository,
+        engine: LiveStreamingEngine,
+        settingsStore: AppSettings
+    ) {
         var screen by remember { mutableStateOf<Screen>(Screen.Home) }
+        var validationError by remember { mutableStateOf<String?>(null) }
         val profiles by repo.profiles.collectAsStateWithLifecycle()
         val state by engine.state.collectAsStateWithLifecycle()
         val stats by engine.stats.collectAsStateWithLifecycle()
         val logs by engine.logs.collectAsStateWithLifecycle()
+        val settings by settingsStore.state.collectAsStateWithLifecycle()
         val context = this
 
         when (val current = screen) {
             is Screen.Home -> HomeScreen(
                 profiles = profiles,
-                onCreate = { screen = Screen.Edit(StreamProfile()) },
-                onOpen = { screen = Screen.Dashboard(it.id) },
+                onCreate = {
+                    screen = Screen.Edit(
+                        StreamProfile(
+                            bitrateKbps = settings.defaultBitrateKbps,
+                            fps = settings.defaultFps
+                        )
+                    )
+                },
+                onOpen = { validationError = null; screen = Screen.Dashboard(it.id) },
                 onEdit = { screen = Screen.Edit(it) },
                 onDuplicate = { repo.duplicate(it.id) },
                 onDelete = { repo.delete(it.id) },
-                onDiagnostics = { screen = Screen.Diagnostics }
+                onDiagnostics = { screen = Screen.Diagnostics },
+                onSettings = { screen = Screen.Settings }
             )
 
             is Screen.Edit -> EditProfileScreen(
@@ -103,6 +124,7 @@ class MainActivity : ComponentActivity() {
                 onSave = { profile, key ->
                     repo.upsert(profile)
                     repo.setStreamKey(profile.id, key.trim())
+                    validationError = null
                     screen = Screen.Dashboard(profile.id)
                 },
                 onCancel = { screen = Screen.Home }
@@ -113,6 +135,8 @@ class MainActivity : ComponentActivity() {
                 if (profile == null) {
                     screen = Screen.Home
                 } else {
+                    // Preview only runs when we are not live; while live the engine
+                    // is already rendering the real pipeline into the same surface.
                     LaunchedEffect(profile.id, state) {
                         if (!state.isActive) engine.startPreview(profile)
                     }
@@ -122,14 +146,22 @@ class MainActivity : ComponentActivity() {
                         state = state,
                         stats = stats,
                         maskedKey = SecureKeyStore.mask(repo.streamKey(profile.id)),
+                        validationError = validationError,
                         onBack = {
                             if (!state.isActive) engine.stopPreview()
                             screen = Screen.Home
                         },
                         onEdit = { screen = Screen.Edit(profile) },
                         onStartLive = {
-                            engine.stopPreview()
-                            LiveStreamingForegroundService.start(context, profile.id)
+                            val key = repo.streamKey(profile.id)
+                            val error = engine.validate(profile, key)
+                            if (error != null) {
+                                validationError = "${error.code}: ${error.detail}"
+                            } else {
+                                validationError = null
+                                engine.stopPreview()
+                                LiveStreamingForegroundService.start(context, profile.id)
+                            }
                         },
                         onStopLive = { LiveStreamingForegroundService.stop(context) },
                         onDiagnostics = { screen = Screen.Diagnostics }
@@ -142,13 +174,19 @@ class MainActivity : ComponentActivity() {
                 logs = logs,
                 onBack = { screen = Screen.Home }
             )
+
+            is Screen.Settings -> SettingsScreen(
+                settings = settings,
+                onChange = { transform -> settingsStore.update(transform) },
+                onDiagnostics = { screen = Screen.Diagnostics },
+                onBack = { screen = Screen.Home }
+            )
         }
     }
 
     private fun probeVideo(uriString: String): Triple<Int, Int, Long>? {
         val controller = VideoSourceController(
-            this, LiveCompositor(), MasterClock(),
-            object : com.livevip.app.video.PlaybackEvents {}
+            this, LiveCompositor(), MasterClock(), object : PlaybackEvents {}
         )
         return runCatching { controller.probe(Uri.parse(uriString)) }.getOrNull()
     }

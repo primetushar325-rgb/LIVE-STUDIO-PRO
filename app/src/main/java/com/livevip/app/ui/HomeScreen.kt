@@ -14,7 +14,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -35,7 +34,8 @@ fun HomeScreen(
     onEdit: (StreamProfile) -> Unit,
     onDuplicate: (StreamProfile) -> Unit,
     onDelete: (StreamProfile) -> Unit,
-    onDiagnostics: () -> Unit
+    onDiagnostics: () -> Unit,
+    onSettings: () -> Unit
 ) {
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(
@@ -49,14 +49,20 @@ fun HomeScreen(
                 fontWeight = FontWeight.Black,
                 color = MaterialTheme.colorScheme.primary
             )
-            TextButton(onClick = onDiagnostics) { Text("DIAGNOSTICS") }
+            Row {
+                TextButton(onClick = onSettings) { Text("SETTINGS") }
+                TextButton(onClick = onDiagnostics) { Text("DIAG") }
+            }
         }
         Text(
             "Direct RTMP / RTMPS mobile broadcasting",
             style = MaterialTheme.typography.bodySmall
         )
         Spacer(Modifier.height(16.dp))
-        Button(onClick = onCreate, modifier = Modifier.fillMaxWidth()) { Text("+ CREATE STREAM") }
+        Button(
+            onClick = onCreate,
+            modifier = Modifier.fillMaxWidth().neonGlow(MaterialTheme.colorScheme.primary)
+        ) { Text("+ CREATE STREAM") }
         Spacer(Modifier.height(16.dp))
         Text("SAVED STREAMS", style = MaterialTheme.typography.labelLarge)
         Spacer(Modifier.height(8.dp))
@@ -97,12 +103,17 @@ private fun ProfileCard(
                 style = MaterialTheme.typography.bodySmall
             )
             Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { onOpen(profile) }) { Text("OPEN") }
-                OutlinedButton(onClick = { onEdit(profile) }) { Text("EDIT") }
-                OutlinedButton(onClick = { onDuplicate(profile) }) { Text("COPY") }
-                TextButton(onClick = { onDelete(profile) }) { Text("DELETE") }
-            }
+            Button(
+                onClick = { onOpen(profile) },
+                modifier = Modifier.fillMaxWidth().neonGlow(MaterialTheme.colorScheme.primary)
+            ) { Text("OPEN") }
+            ResponsiveActions(
+                listOf(
+                    "EDIT" to { onEdit(profile) },
+                    "COPY" to { onDuplicate(profile) },
+                    "DELETE" to { onDelete(profile) }
+                )
+            )
         }
     }
 }

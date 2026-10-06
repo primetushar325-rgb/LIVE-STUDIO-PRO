@@ -22,7 +22,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -98,21 +100,35 @@ class LiveStreamingForegroundService : Service() {
     private fun observe(engine: LiveStreamingEngine, name: String) {
         collectJob?.cancel()
         collectJob = scope.launch {
-            engine.state.collectLatest { state ->
-                val stats = engine.stats.value
-                val text = buildString {
-                    append(state.label())
-                    if (state.isLive) {
-                        append(" • ").append(stats.elapsedLabel())
-                        append(" • ").append(stats.bitrateBps / 1000).append(" kbps")
-                    }
+            // State changes stop the service; a 1 second ticker keeps the
+            // notification timer and bitrate in sync with the real engine.
+            launch {
+                while (isActive) {
+                    val state = engine.state.value
+                    if (state.isActive) updateNotification(notification(name, statusText(engine)))
+                    delay(1000)
                 }
-                updateNotification(notification(name, text))
+            }
+            engine.state.collectLatest { state ->
+                updateNotification(notification(name, statusText(engine)))
                 if (state == StreamState.STOPPED || state == StreamState.ERROR) {
                     releaseWakeLock()
                     stopForegroundCompat()
                     stopSelf()
                 }
+            }
+        }
+    }
+
+    private fun statusText(engine: LiveStreamingEngine): String {
+        val state = engine.state.value
+        val stats = engine.stats.value
+        val dot = if (state.isLive) "LIVE" else state.label()
+        return buildString {
+            append(dot)
+            if (state.isActive) {
+                append("  ").append(stats.elapsedLabel())
+                if (stats.bitrateBps > 0) append("  ").append(stats.bitrateBps / 1000).append(" kbps")
             }
         }
     }
@@ -149,6 +165,7 @@ class LiveStreamingForegroundService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("LIVE VIP — $title")
+            .setSubText("Direct RTMP/RTMPS")
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_live)
             .setOngoing(true)

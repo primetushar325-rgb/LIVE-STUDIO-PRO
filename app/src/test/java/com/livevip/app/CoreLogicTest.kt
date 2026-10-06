@@ -84,6 +84,35 @@ class CoreLogicTest {
     }
 
     @Test
+    fun `elapsed timer formats hours minutes seconds`() {
+        assertEquals("00:00:01", com.livevip.app.engine.StreamStats.formatDuration(1000))
+        assertEquals("01:23:45", com.livevip.app.engine.StreamStats.formatDuration(5_025_000))
+        assertEquals("10:00:00", com.livevip.app.engine.StreamStats.formatDuration(36_000_000))
+    }
+
+    @Test
+    fun `only the streaming state counts as live`() {
+        com.livevip.app.core.StreamState.entries.forEach { state ->
+            assertEquals(state == com.livevip.app.core.StreamState.STREAMING, state.isLive)
+        }
+        assertTrue(com.livevip.app.core.StreamState.CONNECTED.isActive)
+        assertTrue(!com.livevip.app.core.StreamState.CONNECTED.isLive)
+    }
+
+    @Test
+    fun `default composition is centered`() {
+        val state = CompositionState(
+            sourceWidth = 1920, sourceHeight = 1080,
+            outputWidth = 1080, outputHeight = 1920
+        )
+        assertEquals(0f, state.translationX, 0.0001f)
+        assertEquals(0f, state.translationY, 0.0001f)
+        val matrix = state.toMatrix()
+        assertEquals(0f, matrix[12], 0.0001f)
+        assertEquals(0f, matrix[13], 0.0001f)
+    }
+
+    @Test
     fun `amf0 round trips a command name`() {
         val payload = Amf0.encode { out ->
             Amf0.writeString(out, "connect")
