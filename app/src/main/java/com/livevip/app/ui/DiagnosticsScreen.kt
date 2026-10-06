@@ -73,7 +73,8 @@ fun DiagnosticsScreen(
                 "Compositor FPS" to String.format("%.2f", stats.compositorFps),
                 "Encoder in FPS" to String.format("%.2f", stats.encoderInputFps),
                 "Encoder out FPS" to String.format("%.2f", stats.actualFps),
-                "Sent FPS" to String.format("%.2f", stats.sentFps)
+                "Sent FPS" to String.format("%.2f", stats.sentFps),
+                "Repeated frames" to "${stats.repeatedFrames}"
             )
         )
         StatBlock(

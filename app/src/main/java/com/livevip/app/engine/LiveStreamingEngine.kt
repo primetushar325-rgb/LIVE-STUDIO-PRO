@@ -269,6 +269,7 @@ class LiveStreamingEngine(private val context: Context) {
             val encSurface = enc.inputSurface
                 ?: throw StreamException(ErrorCode.ENCODER_UNAVAILABLE, "No encoder input surface")
             compositor.attachEncoder(encSurface)
+            compositor.startFramePump(profile.fps)
             enc.start()
             setState(StreamState.ENCODER_READY)
 
@@ -481,6 +482,7 @@ class LiveStreamingEngine(private val context: Context) {
             compositorFps = compositor.compositorMeter.also { it.refresh() }.fps,
             encoderInputFps = compositor.encoderInputMeter.also { it.refresh() }.fps,
             sentFps = t?.videoSendMeter?.also { it.refresh() }?.fps ?: 0f,
+            repeatedFrames = compositor.repeatedFrames.get(),
             audioSampleRate = ap?.outputSampleRate ?: 0,
             audioChannels = ap?.outputChannels ?: 0,
             audioSourceSampleRate = ap?.sourceSampleRate ?: 0,
@@ -528,6 +530,7 @@ class LiveStreamingEngine(private val context: Context) {
         transport = null
         runCatching { audio?.release() }
         audio = null
+        compositor.stopFramePump()
         runCatching { compositor.detachEncoder() }
         runCatching { encoder?.release() }
         encoder = null

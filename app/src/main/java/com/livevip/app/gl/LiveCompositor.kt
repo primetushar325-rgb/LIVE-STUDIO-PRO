@@ -54,6 +54,13 @@ class LiveCompositor {
     /** Timestamp provider for the encoder surface (master clock, in microseconds). */
     @Volatile var ptsProviderUs: (() -> Long)? = null
 
+    /** Last transform matrix, reused when the frame pump repeats a frame. */
+    private val lastTexMatrix = FloatArray(16)
+    @Volatile private var lastDrawMs: Long = 0
+    @Volatile private var pumpIntervalMs: Long = 0
+    @Volatile private var pumpRunning = false
+    val repeatedFrames = AtomicLong(0)
+
     fun start() {
         if (thread != null) return
         val t = HandlerThread("LiveCompositor").also { it.start() }
@@ -141,11 +148,11 @@ class LiveCompositor {
         try {
             core.makeCurrent(dummySurface!!)
             st.updateTexImage()
+            st.getTransformMatrix(lastTexMatrix)
             compositorMeter.tick()
             firstFrameReceived = true
             lastFrameTimeMs = System.currentTimeMillis()
-            val texMatrix = FloatArray(16)
-            st.getTransformMatrix(texMatrix)
+            val texMatrix = lastTexMatrix
             val comp = composition
             val mvp = comp.toMatrix()
 
@@ -167,8 +174,66 @@ class LiveCompositor {
                 encoderFrameCount.incrementAndGet()
                 encoderInputMeter.tick()
             }
+            lastDrawMs = System.currentTimeMillis()
         } catch (t: Throwable) {
             lastError = "Compositor draw failed: ${t.message}"
+        }
+    }
+
+    /**
+     * Keeps the encoder fed at the configured frame rate.
+     *
+     * The decoder can stall briefly (playlist item switch, loop restart, a slow
+     * keyframe). Without this the encoder simply receives fewer frames, which is
+     * how a 30 FPS profile ends up sending ~24 FPS and why a loop boundary can show
+     * a frozen/black gap. When no new decoded frame arrived in time we re-present
+     * the last decoded frame with a fresh master-clock timestamp, so output cadence
+     * and PTS spacing stay correct. It never invents a frame before the first real
+     * one arrives, and it stands down as soon as the decoder keeps up.
+     */
+    fun startFramePump(targetFps: Int) {
+        val h = handler ?: return
+        if (pumpRunning || targetFps <= 0) return
+        pumpIntervalMs = (1000L / targetFps).coerceAtLeast(1L)
+        pumpRunning = true
+        h.postDelayed(object : Runnable {
+            override fun run() {
+                if (!pumpRunning) return
+                val interval = pumpIntervalMs
+                val now = System.currentTimeMillis()
+                if (firstFrameReceived && encoderEglSurface != null &&
+                    now - lastDrawMs >= interval + interval / 2
+                ) {
+                    repeatLastFrame()
+                }
+                handler?.postDelayed(this, (interval / 2).coerceAtLeast(1L))
+            }
+        }, pumpIntervalMs)
+    }
+
+    fun stopFramePump() {
+        pumpRunning = false
+    }
+
+    private fun repeatLastFrame() {
+        val core = egl ?: return
+        val prog = program ?: return
+        val es = encoderEglSurface ?: return
+        try {
+            val comp = composition
+            core.makeCurrent(es)
+            GLES20.glViewport(0, 0, comp.outputWidth, comp.outputHeight)
+            prog.clearBlack()
+            prog.draw(textureId, lastTexMatrix, comp.toMatrix())
+            val ptsUs = ptsProviderUs?.invoke() ?: (System.nanoTime() / 1000)
+            core.setPresentationTime(es, ptsUs * 1000)
+            core.swapBuffers(es)
+            encoderFrameCount.incrementAndGet()
+            encoderInputMeter.tick()
+            repeatedFrames.incrementAndGet()
+            lastDrawMs = System.currentTimeMillis()
+        } catch (t: Throwable) {
+            lastError = "Frame pump failed: ${t.message}"
         }
     }
 
@@ -200,6 +265,7 @@ class LiveCompositor {
     }
 
     fun release() {
+        pumpRunning = false
         val h = handler ?: return
         val latch = CountDownLatch(1)
         h.post {

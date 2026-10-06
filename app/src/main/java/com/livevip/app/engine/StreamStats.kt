@@ -47,6 +47,8 @@ data class StreamStats(
     val compositorFps: Float = 0f,
     val encoderInputFps: Float = 0f,
     val sentFps: Float = 0f,
+    /** Frames re-presented to the encoder because the decoder stalled (real count). */
+    val repeatedFrames: Long = 0,
     val targetBitrateKbps: Int = 0,
     // --- audio health ---
     val audioSampleRate: Int = 0,
