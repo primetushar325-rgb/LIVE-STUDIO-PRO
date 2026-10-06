@@ -78,7 +78,9 @@ class CoreLogicTest {
         val header = FlvPackager.avcSequenceHeader(sps, pps)
         assertEquals(0x17, header[0].toInt() and 0xFF)
         assertEquals(0x00, header[1].toInt())
-        assertEquals(0x01, header[4].toInt())
+        // 3 bytes composition time, then AVCDecoderConfigurationRecord
+        assertEquals(0x01, header[5].toInt())
+        assertEquals(0x42, header[6].toInt())
     }
 
     @Test
