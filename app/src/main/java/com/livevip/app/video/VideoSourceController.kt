@@ -179,7 +179,7 @@ class VideoSourceController(
                 return
             }
 
-            decoder = try {
+            val createdDecoder = try {
                 MediaCodec.createDecoderByType(mime).also {
                     it.configure(format, surface, null, 0)
                     it.start()
@@ -188,11 +188,12 @@ class VideoSourceController(
                 events.onError(ErrorCode.VIDEO_DECODER_FAILED, "Decoder failed for $mime: ${t.message}")
                 return
             }
+            decoder = createdDecoder
             decoderInitialized = true
 
             if (audioEnabled) startAudioForItem(uri)
 
-            decodeVideo(extractor, decoder)
+            decodeVideo(extractor, createdDecoder)
         } finally {
             runCatching { decoder?.stop() }
             runCatching { decoder?.release() }
