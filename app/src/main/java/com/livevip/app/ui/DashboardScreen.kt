@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,6 +20,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -53,59 +55,133 @@ fun DashboardScreen(
     onStopLive: () -> Unit,
     onDiagnostics: () -> Unit
 ) {
-    Column(Modifier.fillMaxSize().padding(14.dp).verticalScroll(rememberScrollState())) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(onClick = onBack) { Text("< STREAMS") }
-            StatusPill(state)
-        }
-        Text(profile.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        Text(profile.summaryLine(), style = MaterialTheme.typography.bodySmall)
-
-        Spacer(Modifier.height(10.dp))
-        Box(
+    Column(Modifier.fillMaxSize()) {
+        // Scrollable content…
+        Column(
             Modifier
-                .fillMaxWidth()
-                .aspectRatio(
-                    if (profile.orientation == Orientation.LANDSCAPE_16_9) 16f / 9f else 9f / 16f
-                )
-                .neonGlow(
-                    if (state.isLive) statusColor(state) else MaterialTheme.colorScheme.outline,
-                    cornerRadius = 12.dp,
-                    radius = if (state.isLive) 18.dp else 8.dp
-                )
-                .background(Color.Black, RoundedCornerShape(12.dp))
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(start = 14.dp, end = 14.dp, top = 14.dp)
         ) {
-            PreviewSurface(engine, Modifier.fillMaxSize())
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onBack) { Text("< STREAMS") }
+                StatusPill(state)
+            }
+            Text(profile.name, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(profile.summaryLine(), style = MaterialTheme.typography.bodySmall)
+
+            Spacer(Modifier.height(10.dp))
+            // Preview is capped in height so the live controls always stay reachable,
+            // even for a 9:16 output on a small phone.
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 320.dp)
+                    .aspectRatio(
+                        if (profile.orientation == Orientation.LANDSCAPE_16_9) 16f / 9f else 9f / 16f
+                    )
+                    .neonGlow(
+                        if (state.isLive) statusColor(state) else MaterialTheme.colorScheme.outline,
+                        cornerRadius = 12.dp,
+                        radius = if (state.isLive) 18.dp else 8.dp
+                    )
+                    .background(Color.Black, RoundedCornerShape(12.dp))
+            ) {
+                PreviewSurface(engine, Modifier.fillMaxSize())
+            }
+
+            Spacer(Modifier.height(8.dp))
+            ResponsiveActions(
+                listOf(
+                    "FIT" to { engine.updateComposition { it.copy(fitMode = FitMode.FIT) } },
+                    "FILL" to { engine.updateComposition { it.copy(fitMode = FitMode.FILL) } },
+                    "RESET" to { engine.updateComposition { it.reset() } },
+                    "EDIT" to onEdit
+                )
+            )
+
+            Spacer(Modifier.height(14.dp))
+            LiveControlPanel(
+                profile = profile,
+                state = state,
+                stats = stats,
+                maskedKey = maskedKey,
+                validationError = validationError,
+                onStartLive = onStartLive,
+                onStopLive = onStopLive
+            )
+
+            Spacer(Modifier.height(10.dp))
+            TextButton(onClick = onDiagnostics) { Text("OPEN DIAGNOSTICS") }
+            Spacer(Modifier.height(14.dp))
         }
 
-        Spacer(Modifier.height(8.dp))
-        ResponsiveActions(
-            listOf(
-                "FIT" to { engine.updateComposition { it.copy(fitMode = FitMode.FIT) } },
-                "FILL" to { engine.updateComposition { it.copy(fitMode = FitMode.FILL) } },
-                "RESET" to { engine.updateComposition { it.reset() } },
-                "EDIT" to onEdit
-            )
-        )
-
-        Spacer(Modifier.height(14.dp))
-        LiveControlPanel(
-            profile = profile,
+        // …and a sticky live bar that is ALWAYS visible without scrolling.
+        StickyLiveBar(
             state = state,
             stats = stats,
-            maskedKey = maskedKey,
-            validationError = validationError,
+            canStart = profile.playlist.isNotEmpty(),
             onStartLive = onStartLive,
             onStopLive = onStopLive
         )
+    }
+}
 
-        Spacer(Modifier.height(10.dp))
-        TextButton(onClick = onDiagnostics) { Text("OPEN DIAGNOSTICS") }
-        Spacer(Modifier.height(30.dp))
+/** Always-visible bottom bar with the real state, timer and START/STOP control. */
+@Composable
+private fun StickyLiveBar(
+    state: StreamState,
+    stats: StreamStats,
+    canStart: Boolean,
+    onStartLive: () -> Unit,
+    onStopLive: () -> Unit
+) {
+    val accent = statusColor(state)
+    Surface(
+        tonalElevation = 6.dp,
+        color = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                StatusPill(state)
+                Text(
+                    stats.elapsedLabel(),
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Black,
+                    color = accent
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            if (state.isActive) {
+                Button(
+                    onClick = onStopLive,
+                    enabled = state != StreamState.STOPPING,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .neonGlow(MaterialTheme.colorScheme.error, radius = 16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("STOP LIVE", fontWeight = FontWeight.Black) }
+            } else {
+                Button(
+                    onClick = onStartLive,
+                    enabled = canStart,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(54.dp)
+                        .neonGlow(MaterialTheme.colorScheme.primary, radius = 18.dp)
+                ) { Text("START LIVE", fontWeight = FontWeight.Black) }
+            }
+        }
     }
 }
 
@@ -191,27 +267,17 @@ private fun LiveControlPanel(
                 Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
             }
 
-            Spacer(Modifier.height(14.dp))
-            val live = state.isActive
-            if (live) {
-                Button(
-                    onClick = onStopLive,
-                    enabled = state != StreamState.STOPPING,
-                    modifier = Modifier.fillMaxWidth().neonGlow(MaterialTheme.colorScheme.error),
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) { Text("STOP LIVE", fontWeight = FontWeight.Black) }
-            } else {
-                Button(
-                    onClick = onStartLive,
-                    modifier = Modifier.fillMaxWidth().neonGlow(MaterialTheme.colorScheme.primary, radius = 18.dp)
-                ) { Text("START LIVE", fontWeight = FontWeight.Black) }
-                if (profile.playlist.isEmpty()) {
-                    Text(
-                        "Add at least one video before going live.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Use the START LIVE / STOP LIVE control at the bottom of the screen.",
+                style = MaterialTheme.typography.bodySmall
+            )
+            if (profile.playlist.isEmpty()) {
+                Text(
+                    "Add at least one video before going live.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
         }
     }
