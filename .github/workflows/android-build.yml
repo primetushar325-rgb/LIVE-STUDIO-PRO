@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build debug APK
@@ -58,6 +61,21 @@ jobs:
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish APK as a downloadable release
+        if: github.ref == 'refs/heads/arena/65ff4f46-live-studio-pro'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-debug
+          name: LIVE VIP — latest debug APK
+          body: |
+            Debug APK built by GitHub Actions from commit ${{ github.sha }}.
+            Direct download below — no GitHub login required.
+          files: app/build/outputs/apk/debug/*.apk
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload lint and test reports
         if: always()
