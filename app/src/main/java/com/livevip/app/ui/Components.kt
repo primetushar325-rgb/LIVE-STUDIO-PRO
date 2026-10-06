@@ -81,7 +81,9 @@ fun StatusPill(state: com.livevip.app.core.StreamState) {
                 .background(color, androidx.compose.foundation.shape.CircleShape)
         )
         Text(
-            "  ${statusSymbol(state)} ${state.label()}",
+            if (state == com.livevip.app.core.StreamState.STREAMING ||
+                state == com.livevip.app.core.StreamState.SENDING
+            ) "  ● LIVE — ${state.label()}" else "  ${statusSymbol(state)} ${state.label()}",
             style = MaterialTheme.typography.labelLarge,
             fontWeight = FontWeight.Black,
             color = color
@@ -92,9 +94,12 @@ fun StatusPill(state: com.livevip.app.core.StreamState) {
 @Composable
 fun statusColor(state: com.livevip.app.core.StreamState): androidx.compose.ui.graphics.Color =
     when (state) {
+        // STREAMING is GREEN (that state is only reached when packets really flow).
         com.livevip.app.core.StreamState.STREAMING,
-        com.livevip.app.core.StreamState.SENDING -> androidx.compose.ui.graphics.Color(0xFFFF1744)
-        com.livevip.app.core.StreamState.CONNECTED -> androidx.compose.ui.graphics.Color(0xFF00E676)
+        com.livevip.app.core.StreamState.SENDING -> androidx.compose.ui.graphics.Color(0xFF00E676)
+        com.livevip.app.core.StreamState.CONNECTED -> androidx.compose.ui.graphics.Color(0xFF00E5FF)
+        com.livevip.app.core.StreamState.STOPPING,
+        com.livevip.app.core.StreamState.RECONNECTING -> androidx.compose.ui.graphics.Color(0xFFFF9100)
         com.livevip.app.core.StreamState.ERROR,
         com.livevip.app.core.StreamState.NETWORK_LOST -> MaterialTheme.colorScheme.error
         com.livevip.app.core.StreamState.IDLE,
@@ -103,7 +108,7 @@ fun statusColor(state: com.livevip.app.core.StreamState): androidx.compose.ui.gr
     }
 
 private fun statusSymbol(state: com.livevip.app.core.StreamState): String = when (state) {
-    com.livevip.app.core.StreamState.STREAMING, com.livevip.app.core.StreamState.SENDING -> "REC"
+    com.livevip.app.core.StreamState.STREAMING, com.livevip.app.core.StreamState.SENDING -> "●"
     com.livevip.app.core.StreamState.ERROR, com.livevip.app.core.StreamState.NETWORK_LOST -> "!"
     com.livevip.app.core.StreamState.IDLE, com.livevip.app.core.StreamState.STOPPED -> "•"
     else -> "…"

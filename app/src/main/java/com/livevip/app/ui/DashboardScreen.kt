@@ -230,8 +230,14 @@ private fun LiveControlPanel(
                 StatRow("Current video", "${stats.currentVideoIndex + 1} / ${maxOf(stats.playlistSize, profile.playlist.size)}")
                 StatRow("Playing", stats.currentVideoName)
                 StatRow("Loop", "${stats.loopIndex} / ${stats.loopTarget}")
-                StatRow("FPS", String.format("%.1f", stats.actualFps))
-                StatRow("Bitrate", "${stats.bitrateBps / 1000} kbps")
+                StatRow("FPS decoder", String.format("%.1f", stats.decoderFps))
+                StatRow("FPS compositor", String.format("%.1f", stats.compositorFps))
+                StatRow("FPS encoder in", String.format("%.1f", stats.encoderInputFps))
+                StatRow("FPS encoder out", String.format("%.1f", stats.actualFps))
+                StatRow("FPS sent", String.format("%.1f", stats.sentFps))
+                StatRow("FPS target", "${stats.targetFps}")
+                StatRow("Bitrate actual", "${stats.bitrateBps / 1000} kbps")
+                StatRow("Bitrate target", "${stats.targetBitrateKbps} kbps")
                 StatRow("Encoded frames", "${stats.encodedFrames}")
                 StatRow("Dropped frames", "${stats.droppedFrames}")
                 StatRow("Data sent", formatBytes(stats.bytesSent))
@@ -242,8 +248,36 @@ private fun LiveControlPanel(
                     if (stats.rtmpPublishing) "PUBLISHING" else if (stats.rtmpConnected) "CONNECTED"
                     else "DISCONNECTED"
                 )
-                StatRow("Audio", if (stats.audioReady) "READY" else "NOT READY")
-                StatRow("Network", stats.networkTransport)
+                StatRow(
+                    "Audio out",
+                    if (stats.audioSampleRate > 0)
+                        "${stats.audioSampleRate} Hz / ${stats.audioChannels} ch AAC-LC"
+                    else "-"
+                )
+                StatRow(
+                    "Audio source",
+                    if (stats.audioSourceSampleRate > 0)
+                        "${stats.audioSourceSampleRate} Hz / ${stats.audioSourceChannels} ch"
+                    else "-"
+                )
+                StatRow("Audio frames", "${stats.audioFrames}")
+                StatRow("Audio buffer", "${stats.audioBufferPercent}%")
+                StatRow("Audio underruns", "${stats.audioUnderruns}")
+                StatRow("Audio overruns", "${stats.audioOverruns}")
+                StatRow("Audio silence frames", "${stats.audioSilenceFrames}")
+                StatRow("Audio encode errors", "${stats.audioEncodeErrors}")
+                StatRow("A/V offset", String.format("%+d ms", stats.avOffsetMs))
+                StatRow("Network type", stats.networkTransport)
+                StatRow("Network link", if (stats.networkConnected) "CONNECTED" else "DOWN")
+                StatRow("Send queue", formatBytes(stats.sendQueueBytes))
+                StatRow("Send errors", "${stats.sendErrors}")
+                StatRow("Foreground service", if (stats.serviceRunning) "RUNNING" else "STOPPED")
+                StatRow("Screen", if (stats.screenOn) "ON" else "OFF")
+                StatRow("Activity", if (stats.activityVisible) "VISIBLE" else "BACKGROUND")
+                StatRow("Health video", stats.videoHealth().name)
+                StatRow("Health audio", stats.audioHealth().name)
+                StatRow("Health sync", stats.syncHealth().name)
+                StatRow("Health network", stats.networkHealth().name)
             } else {
                 Spacer(Modifier.height(6.dp))
                 StatRow("Videos", "${profile.playlist.size}")

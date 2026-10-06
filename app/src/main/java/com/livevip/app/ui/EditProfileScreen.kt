@@ -143,9 +143,9 @@ fun EditProfileScreen(
         SectionTitle("FPS")
         ChipRow(listOf(24, 25, 30), profile.fps, { "$it" }) { profile = profile.copy(fps = it) }
 
-        SectionTitle("BITRATE (kbps)")
+        SectionTitle("BITRATE — 720p30: 3000 LOW / 4500 BALANCED / 6000 HIGH")
         ChipRow(
-            listOf(1500, 2500, 4000, 6000), profile.bitrateKbps, { "$it" }
+            listOf(2500, 3000, 4500, 6000, 9000), profile.bitrateKbps, { "$it" }
         ) { profile = profile.copy(bitrateKbps = it) }
 
         SectionTitle("AUDIO")

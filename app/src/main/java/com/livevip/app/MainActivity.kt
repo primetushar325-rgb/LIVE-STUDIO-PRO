@@ -203,6 +203,17 @@ class MainActivity : ComponentActivity() {
         }.getOrNull() ?: (uri.lastPathSegment ?: "video")
     }
 
+    override fun onStart() {
+        super.onStart()
+        LiveStreamingEngine.get(this).activityVisible = true
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // UI only: the engine keeps streaming inside the foreground service.
+        LiveStreamingEngine.get(this).activityVisible = false
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         val engine = LiveStreamingEngine.get(this)

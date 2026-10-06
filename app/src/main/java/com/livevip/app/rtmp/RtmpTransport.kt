@@ -2,6 +2,7 @@ package com.livevip.app.rtmp
 
 import com.livevip.app.core.ErrorCode
 import com.livevip.app.core.StreamException
+import com.livevip.app.engine.FpsMeter
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -27,6 +28,9 @@ class RtmpTransport(
     val bytesSent = AtomicLong(0)
     val packetsSent = AtomicLong(0)
     val droppedPackets = AtomicLong(0)
+    val sendErrors = AtomicLong(0)
+    val videoSendMeter = FpsMeter()
+    @Volatile var queueBytes: Long = 0; private set
     @Volatile var currentBitrateBps: Long = 0; private set
     @Volatile var firstMediaSent = false; private set
     @Volatile var lastError: String? = null
@@ -72,9 +76,11 @@ class RtmpTransport(
 
     private fun enqueue(packet: Packet) {
         if (!running.get()) return
+        queueBytes += packet.payload.size
         if (!queue.offer(packet)) {
             // Network slower than the encoder: drop the oldest non-keyframe data.
-            queue.poll()
+            val dropped = queue.poll()
+            if (dropped != null) queueBytes = (queueBytes - dropped.payload.size).coerceAtLeast(0)
             droppedPackets.incrementAndGet()
             queue.offer(packet)
         }
@@ -85,8 +91,13 @@ class RtmpTransport(
             while (running.get()) {
                 val packet = queue.poll(200, TimeUnit.MILLISECONDS) ?: continue
                 val c = client ?: break
-                if (packet.video) c.sendVideo(packet.payload, packet.timestampMs)
-                else c.sendAudio(packet.payload, packet.timestampMs)
+                if (packet.video) {
+                    c.sendVideo(packet.payload, packet.timestampMs)
+                    videoSendMeter.tick()
+                } else {
+                    c.sendAudio(packet.payload, packet.timestampMs)
+                }
+                queueBytes = (queueBytes - packet.payload.size).coerceAtLeast(0)
 
                 packetsSent.incrementAndGet()
                 bytesSent.addAndGet(packet.payload.size.toLong())
@@ -105,6 +116,7 @@ class RtmpTransport(
             }
         } catch (e: StreamException) {
             lastError = e.message
+            sendErrors.incrementAndGet()
             if (running.get()) onConnectionLost(e.message ?: "send failed")
         } catch (t: Throwable) {
             lastError = t.message

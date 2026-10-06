@@ -11,8 +11,8 @@ android {
         applicationId = "com.livevip.app"
         minSdk = 24
         targetSdk = 34
-        versionCode = 4
-        versionName = "1.3.0-rtmpfix"
+        versionCode = 5
+        versionName = "1.4.0-mediafix"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

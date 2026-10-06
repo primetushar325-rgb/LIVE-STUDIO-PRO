@@ -41,8 +41,28 @@ class VideoEncoderController(
     private var fpsWindowStart = 0L
     private var fpsWindowFrames = 0L
 
+    /** Pick a hardware AVC encoder; returns null if only software is available. */
+    private fun selectHardwareEncoder(): String? = runCatching {
+        val list = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+        list.codecInfos.firstOrNull { info ->
+            info.isEncoder &&
+                info.supportedTypes.any { it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, true) } &&
+                (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q ||
+                    info.isHardwareAccelerated)
+        }?.name
+    }.getOrNull()
+
+    private fun supportsHighProfile(name: String): Boolean = runCatching {
+        val list = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS)
+        val info = list.codecInfos.firstOrNull { it.name == name } ?: return false
+        info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            .profileLevels.any { it.profile == MediaCodecInfo.CodecProfileLevel.AVCProfileHigh }
+    }.getOrDefault(false)
+
     fun prepare() {
         try {
+            val hwName = selectHardwareEncoder()
+            val highProfileSupported = hwName != null && supportsHighProfile(hwName)
             val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
                 setInteger(
                     MediaFormat.KEY_COLOR_FORMAT,
@@ -52,15 +72,32 @@ class VideoEncoderController(
                 setInteger(MediaFormat.KEY_FRAME_RATE, fps)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, keyframeIntervalSec)
                 setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                // H.264 High profile when the hardware encoder really advertises it,
+                // otherwise stay on Baseline (never a software fallback).
                 setInteger(
                     MediaFormat.KEY_PROFILE,
-                    MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+                    if (highProfileSupported) MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
+                    else MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
                 )
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-                    setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+                    setInteger(
+                        MediaFormat.KEY_LEVEL,
+                        if (highProfileSupported) MediaCodecInfo.CodecProfileLevel.AVCLevel4
+                        else MediaCodecInfo.CodecProfileLevel.AVCLevel31
+                    )
+                }
+                // Live: no B-frames, encode in real time, low latency where supported.
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                    setInteger(MediaFormat.KEY_LATENCY, 1)
+                    setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
+                    setInteger(MediaFormat.KEY_PRIORITY, 0)
+                }
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N_MR1) {
+                    setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
                 }
             }
-            val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            val c = if (hwName != null) MediaCodec.createByCodecName(hwName)
+            else MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
             codecName = runCatching { c.name }.getOrDefault("h264")
             try {
                 c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)

@@ -1,6 +1,5 @@
 package com.livevip.app.audio
 
-import android.Manifest
 import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
@@ -8,35 +7,40 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaRecorder
-import androidx.annotation.RequiresPermission
 import com.livevip.app.core.ErrorCode
 import com.livevip.app.core.MasterClock
 import java.nio.ByteBuffer
-import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * AAC audio pipeline.
+ * AAC-LC audio pipeline, normalised to ONE stable output format.
  *
- * Sources: decoded video audio (PCM pushed in) and/or the microphone.
- * Both are mixed into one stream and encoded with a single AAC encoder that is
- * created once per live session. Timestamps come from the shared MasterClock,
- * so audio stays monotonic across playlist items and loops.
+ *   source PCM (any rate/channels) -> continuous-phase resampler -> ring buffer
+ *   -> [optional mic mix] -> AAC-LC 48 kHz stereo 128 kbps -> FLV -> RTMP
+ *
+ * Audio PTS advances strictly by encoded sample count, so it stays monotonic
+ * across playlist items, loops and reconnects.
  */
 class AudioPipeline(
     private val clock: MasterClock,
-    private val sampleRate: Int = 44100,
-    private val channelCount: Int = 2,
-    private val bitrate: Int = 128_000,
     private val micEnabled: Boolean,
     private val videoAudioEnabled: Boolean,
     private val onAudioConfig: (ByteArray) -> Unit,
     private val onAacFrame: (ByteBuffer, MediaCodec.BufferInfo) -> Unit,
     private val onError: (ErrorCode, String) -> Unit
 ) {
-    private val frameSamples = 1024
-    private val bytesPerFrame = frameSamples * channelCount * 2
+    companion object {
+        const val OUTPUT_SAMPLE_RATE = 48_000
+        const val OUTPUT_CHANNELS = 2
+        const val OUTPUT_BITRATE = 128_000
+        private const val FRAME_SAMPLES = 1024
+        /** ~1.5 s of audio; large enough to absorb decoder bursts. */
+        private const val RING_SECONDS = 1.5f
+    }
+
+    private val bytesPerFrame = FRAME_SAMPLES * OUTPUT_CHANNELS * 2
+    private val ringCapacity = (OUTPUT_SAMPLE_RATE * OUTPUT_CHANNELS * 2 * RING_SECONDS).toInt()
 
     private var codec: MediaCodec? = null
     private val running = AtomicBoolean(false)
@@ -45,23 +49,35 @@ class AudioPipeline(
     private var micThread: Thread? = null
     private var audioRecord: AudioRecord? = null
 
-    private val videoPcmQueue = ArrayBlockingQueue<ByteArray>(64)
-    private val micPcmQueue = ArrayBlockingQueue<ByteArray>(64)
+    private val videoRing = PcmRingBuffer(ringCapacity)
+    private val micRing = PcmRingBuffer(ringCapacity)
+    private var videoResampler: Resampler? = null
+    private var videoSrcRate = 0
+    private var videoSrcChannels = 0
 
     @Volatile var audioReady = false; private set
     @Volatile var lastError: String? = null
     val encodedFrames = AtomicLong(0)
     val encodedBytes = AtomicLong(0)
-    @Volatile var sourceSampleRate = sampleRate
-    @Volatile var sourceChannels = channelCount
+    val encodeErrors = AtomicLong(0)
+    val silenceFramesInserted = AtomicLong(0)
+
+    val underruns: Long get() = videoRing.underruns + micRing.underruns
+    val overruns: Long get() = videoRing.overruns + micRing.overruns
+    val bufferFillPercent: Int
+        get() = ((if (videoAudioEnabled) videoRing.fillRatio() else micRing.fillRatio()) * 100).toInt()
+    val outputSampleRate: Int get() = OUTPUT_SAMPLE_RATE
+    val outputChannels: Int get() = OUTPUT_CHANNELS
+    @Volatile var sourceSampleRate: Int = 0; private set
+    @Volatile var sourceChannels: Int = 0; private set
 
     fun prepare() {
         try {
             val format = MediaFormat.createAudioFormat(
-                MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, channelCount
+                MediaFormat.MIMETYPE_AUDIO_AAC, OUTPUT_SAMPLE_RATE, OUTPUT_CHANNELS
             ).apply {
                 setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+                setInteger(MediaFormat.KEY_BIT_RATE, OUTPUT_BITRATE)
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, bytesPerFrame * 4)
             }
             val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
@@ -69,7 +85,7 @@ class AudioPipeline(
             c.start()
             codec = c
             audioReady = true
-            onAudioConfig(aacAudioSpecificConfig())
+            onAudioConfig(audioSpecificConfig())
         } catch (t: Throwable) {
             lastError = t.message
             onError(ErrorCode.AUDIO_ENCODER_FAILED, t.message ?: "AAC encoder failed")
@@ -85,32 +101,34 @@ class AudioPipeline(
         if (micEnabled) startMic()
     }
 
-    /** PCM coming from the decoded video audio track. */
+    /** PCM from the decoded video audio track, in the source's own format. */
     fun pushVideoPcm(data: ByteArray, size: Int, sampleRateIn: Int, channelsIn: Int) {
-        if (!videoAudioEnabled || !running.get()) return
-        sourceSampleRate = sampleRateIn
-        sourceChannels = channelsIn
-        val converted = convert(data, size, sampleRateIn, channelsIn)
-        if (!videoPcmQueue.offer(converted)) {
-            videoPcmQueue.poll()
-            videoPcmQueue.offer(converted)
+        if (!videoAudioEnabled || !running.get() || size <= 0) return
+        if (videoResampler == null || sampleRateIn != videoSrcRate || channelsIn != videoSrcChannels) {
+            // Format changed (new playlist item): rebuild, keeping the output timeline.
+            videoSrcRate = sampleRateIn
+            videoSrcChannels = channelsIn
+            sourceSampleRate = sampleRateIn
+            sourceChannels = channelsIn
+            videoResampler = Resampler(sampleRateIn, channelsIn, OUTPUT_SAMPLE_RATE, OUTPUT_CHANNELS)
         }
+        val converted = videoResampler!!.process(data, size)
+        if (converted.isNotEmpty()) videoRing.write(converted)
     }
 
-    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    @SuppressLint("MissingPermission")
     private fun startMic() {
         try {
-            val channelMask =
-                if (channelCount == 1) AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO
+            val channelMask = AudioFormat.CHANNEL_IN_STEREO
             val minBuf = AudioRecord.getMinBufferSize(
-                sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT
+                OUTPUT_SAMPLE_RATE, channelMask, AudioFormat.ENCODING_PCM_16BIT
             )
             val record = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
-                sampleRate,
+                OUTPUT_SAMPLE_RATE,
                 channelMask,
                 AudioFormat.ENCODING_PCM_16BIT,
-                maxOf(minBuf, bytesPerFrame * 4)
+                maxOf(minBuf, bytesPerFrame * 8)
             )
             if (record.state != AudioRecord.STATE_INITIALIZED) {
                 onError(ErrorCode.AUDIO_INIT_FAILED, "AudioRecord not initialized")
@@ -122,12 +140,7 @@ class AudioPipeline(
                 val buf = ByteArray(bytesPerFrame)
                 while (running.get()) {
                     val read = record.read(buf, 0, buf.size)
-                    if (read > 0) {
-                        val copy = buf.copyOf(read)
-                        if (!micPcmQueue.offer(copy)) {
-                            micPcmQueue.poll(); micPcmQueue.offer(copy)
-                        }
-                    }
+                    if (read > 0) micRing.write(buf, read)
                 }
             }, "MicCapture").also { it.start() }
         } catch (t: Throwable) {
@@ -136,53 +149,47 @@ class AudioPipeline(
     }
 
     /**
-     * Produces exactly one AAC frame worth of PCM per iteration, paced by the
-     * master clock, mixing video audio and microphone when both are active.
+     * One AAC frame per iteration, paced by encoded sample count against the master
+     * clock. Silence is only ever used when the source genuinely has no audio for
+     * this slot, and every occurrence is counted (never hidden).
      */
     private fun feedLoop(c: MediaCodec) {
-        var pending = ByteArray(0)
-        var micPending = ByteArray(0)
+        val videoChunk = ByteArray(bytesPerFrame)
+        val micChunk = ByteArray(bytesPerFrame)
+        val outChunk = ByteArray(bytesPerFrame)
         var samplesSent = 0L
         try {
             while (running.get()) {
-                if (videoAudioEnabled) {
-                    while (pending.size < bytesPerFrame && running.get()) {
-                        val next = videoPcmQueue.poll(20, java.util.concurrent.TimeUnit.MILLISECONDS)
-                        if (next == null) break else pending += next
-                    }
-                }
-                if (micEnabled) {
-                    while (micPending.size < bytesPerFrame && running.get()) {
-                        val next = micPcmQueue.poll(20, java.util.concurrent.TimeUnit.MILLISECONDS)
-                        if (next == null) break else micPending += next
-                    }
-                }
-
-                val expectedSamples = clock.nowUs() * sampleRate / 1_000_000
-                if (samplesSent > expectedSamples + frameSamples) {
+                // Pace: do not run ahead of the output timeline.
+                val expectedSamples = clock.nowUs() * OUTPUT_SAMPLE_RATE / 1_000_000
+                if (samplesSent > expectedSamples + FRAME_SAMPLES * 2) {
                     Thread.sleep(5)
                     continue
                 }
 
-                val chunk = ByteArray(bytesPerFrame)
-                val haveVideo = videoAudioEnabled && pending.size >= bytesPerFrame
-                val haveMic = micEnabled && micPending.size >= bytesPerFrame
+                val haveVideo = videoAudioEnabled && videoRing.available() >= bytesPerFrame &&
+                    videoRing.readFully(videoChunk, bytesPerFrame)
+                val haveMic = micEnabled && micRing.available() >= bytesPerFrame &&
+                    micRing.readFully(micChunk, bytesPerFrame)
+
                 when {
-                    haveVideo && haveMic -> {
-                        mix(pending, micPending, chunk)
-                        pending = pending.copyOfRange(bytesPerFrame, pending.size)
-                        micPending = micPending.copyOfRange(bytesPerFrame, micPending.size)
-                    }
-                    haveVideo -> {
-                        System.arraycopy(pending, 0, chunk, 0, bytesPerFrame)
-                        pending = pending.copyOfRange(bytesPerFrame, pending.size)
-                    }
-                    haveMic -> {
-                        System.arraycopy(micPending, 0, chunk, 0, bytesPerFrame)
-                        micPending = micPending.copyOfRange(bytesPerFrame, micPending.size)
-                    }
+                    haveVideo && haveMic -> mix(videoChunk, micChunk, outChunk)
+                    haveVideo -> System.arraycopy(videoChunk, 0, outChunk, 0, bytesPerFrame)
+                    haveMic -> System.arraycopy(micChunk, 0, outChunk, 0, bytesPerFrame)
                     else -> {
-                        // silence keeps the audio timeline continuous (gaps break ingest)
+                        // Nothing buffered yet. Wait briefly for real audio instead of
+                        // immediately injecting silence (that was the crackling cause).
+                        if (samplesSent <= expectedSamples) {
+                            Thread.sleep(3)
+                            if (videoRing.available() >= bytesPerFrame || micRing.available() >= bytesPerFrame) {
+                                continue
+                            }
+                            java.util.Arrays.fill(outChunk, 0)
+                            silenceFramesInserted.incrementAndGet()
+                        } else {
+                            Thread.sleep(3)
+                            continue
+                        }
                     }
                 }
 
@@ -190,15 +197,16 @@ class AudioPipeline(
                 if (index >= 0) {
                     val buffer = c.getInputBuffer(index)
                     buffer?.clear()
-                    buffer?.put(chunk)
-                    val ptsUs = clock.audioPts(samplesSent * 1_000_000 / sampleRate)
-                    c.queueInputBuffer(index, 0, chunk.size, ptsUs, 0)
-                    samplesSent += frameSamples
+                    buffer?.put(outChunk)
+                    val ptsUs = clock.audioPts(samplesSent * 1_000_000 / OUTPUT_SAMPLE_RATE)
+                    c.queueInputBuffer(index, 0, bytesPerFrame, ptsUs, 0)
+                    samplesSent += FRAME_SAMPLES
                 }
             }
         } catch (t: Throwable) {
             if (running.get()) {
                 lastError = t.message
+                encodeErrors.incrementAndGet()
                 onError(ErrorCode.AUDIO_ENCODER_FAILED, t.message ?: "audio feed failed")
             }
         }
@@ -233,6 +241,7 @@ class AudioPipeline(
         } catch (t: Throwable) {
             if (running.get()) {
                 lastError = t.message
+                encodeErrors.incrementAndGet()
                 onError(ErrorCode.AUDIO_ENCODER_FAILED, t.message ?: "audio drain failed")
             }
         }
@@ -250,8 +259,9 @@ class AudioPipeline(
         runCatching { codec?.release() }
         codec = null
         audioReady = false
-        videoPcmQueue.clear()
-        micPcmQueue.clear()
+        videoRing.clear()
+        micRing.clear()
+        videoResampler = null
     }
 
     private fun mix(a: ByteArray, b: ByteArray, out: ByteArray) {
@@ -259,46 +269,23 @@ class AudioPipeline(
         while (i + 1 < bytesPerFrame) {
             val s1 = ((a[i + 1].toInt() shl 8) or (a[i].toInt() and 0xFF)).toShort().toInt()
             val s2 = ((b[i + 1].toInt() shl 8) or (b[i].toInt() and 0xFF)).toShort().toInt()
-            var m = s1 + s2
-            if (m > 32767) m = 32767
-            if (m < -32768) m = -32768
+            val m = (s1 + s2).coerceIn(-32768, 32767)
             out[i] = (m and 0xFF).toByte()
             out[i + 1] = ((m shr 8) and 0xFF).toByte()
             i += 2
         }
     }
 
-    /** Nearest-neighbour resample + channel adaptation to the encoder format. */
-    private fun convert(data: ByteArray, size: Int, srcRate: Int, srcChannels: Int): ByteArray {
-        if (srcRate == sampleRate && srcChannels == channelCount) return data.copyOf(size)
-        val srcSamples = size / (2 * srcChannels)
-        val dstSamples = (srcSamples.toLong() * sampleRate / srcRate).toInt()
-        val out = ByteArray(dstSamples * 2 * channelCount)
-        for (i in 0 until dstSamples) {
-            val srcIndex = (i.toLong() * srcRate / sampleRate).toInt().coerceAtMost(srcSamples - 1)
-            for (ch in 0 until channelCount) {
-                val srcCh = if (ch < srcChannels) ch else srcChannels - 1
-                val sPos = (srcIndex * srcChannels + srcCh) * 2
-                val dPos = (i * channelCount + ch) * 2
-                if (sPos + 1 < size && dPos + 1 < out.size) {
-                    out[dPos] = data[sPos]
-                    out[dPos + 1] = data[sPos + 1]
-                }
-            }
-        }
-        return out
-    }
-
-    /** AAC LC AudioSpecificConfig used by the FLV AAC sequence header. */
-    private fun aacAudioSpecificConfig(): ByteArray {
-        val freqIndex = when (sampleRate) {
+    /** AAC-LC AudioSpecificConfig matching the ACTUAL encoder format (48 kHz stereo). */
+    private fun audioSpecificConfig(): ByteArray {
+        val freqIndex = when (OUTPUT_SAMPLE_RATE) {
             96000 -> 0; 88200 -> 1; 64000 -> 2; 48000 -> 3; 44100 -> 4; 32000 -> 5
             24000 -> 6; 22050 -> 7; 16000 -> 8; 12000 -> 9; 11025 -> 10; 8000 -> 11
-            else -> 4
+            else -> 3
         }
         val objectType = 2 // AAC LC
         val b0 = ((objectType shl 3) or (freqIndex shr 1)).toByte()
-        val b1 = (((freqIndex and 1) shl 7) or (channelCount shl 3)).toByte()
+        val b1 = (((freqIndex and 1) shl 7) or (OUTPUT_CHANNELS shl 3)).toByte()
         return byteArrayOf(b0, b1)
     }
 }

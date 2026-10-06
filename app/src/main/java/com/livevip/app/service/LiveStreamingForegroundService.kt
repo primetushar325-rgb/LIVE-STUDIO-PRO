@@ -6,7 +6,9 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
+import android.content.BroadcastReceiver
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
@@ -62,12 +64,33 @@ class LiveStreamingForegroundService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var collectJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var screenReceiver: BroadcastReceiver? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
+        val engine = LiveStreamingEngine.get(this)
+        engine.serviceRunning = true
+        // Screen state is diagnostics only: streaming NEVER stops because the
+        // screen turned off or the Activity went away.
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_SCREEN_OFF -> engine.screenOn = false
+                    Intent.ACTION_SCREEN_ON -> engine.screenOn = true
+                }
+            }
+        }
+        screenReceiver = receiver
+        registerReceiver(
+            receiver,
+            IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_SCREEN_OFF)
+            }
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -123,12 +146,15 @@ class LiveStreamingForegroundService : Service() {
     private fun statusText(engine: LiveStreamingEngine): String {
         val state = engine.state.value
         val stats = engine.stats.value
-        val dot = if (state.isLive) "LIVE" else state.label()
         return buildString {
-            append(dot)
+            append(if (state.isLive) "● LIVE — STREAMING" else state.label())
             if (state.isActive) {
                 append("  ").append(stats.elapsedLabel())
-                if (stats.bitrateBps > 0) append("  ").append(stats.bitrateBps / 1000).append(" kbps")
+                if (stats.sentFps > 0) append("  ").append(String.format("%.0f fps", stats.sentFps))
+                if (stats.bitrateBps > 0) {
+                    append("  ").append(String.format("%.1f Mbps", stats.bitrateBps / 1_000_000.0))
+                }
+                if (stats.networkTransport != "-") append("  ").append(stats.networkTransport)
             }
         }
     }
@@ -211,6 +237,9 @@ class LiveStreamingForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        LiveStreamingEngine.get(this).serviceRunning = false
+        screenReceiver?.let { runCatching { unregisterReceiver(it) } }
+        screenReceiver = null
         collectJob?.cancel()
         scope.cancel()
         releaseWakeLock()

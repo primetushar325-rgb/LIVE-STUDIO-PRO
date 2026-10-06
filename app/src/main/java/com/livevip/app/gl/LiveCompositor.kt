@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.view.Surface
 import com.livevip.app.core.CompositionState
+import com.livevip.app.engine.FpsMeter
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicLong
 
@@ -38,6 +39,8 @@ class LiveCompositor {
 
     @Volatile var composition: CompositionState = CompositionState()
 
+    val compositorMeter = FpsMeter()
+    val encoderInputMeter = FpsMeter()
     val previewFrameCount = AtomicLong(0)
     val encoderFrameCount = AtomicLong(0)
     @Volatile var firstFrameReceived = false
@@ -138,6 +141,7 @@ class LiveCompositor {
         try {
             core.makeCurrent(dummySurface!!)
             st.updateTexImage()
+            compositorMeter.tick()
             firstFrameReceived = true
             lastFrameTimeMs = System.currentTimeMillis()
             val texMatrix = FloatArray(16)
@@ -161,6 +165,7 @@ class LiveCompositor {
                 core.setPresentationTime(es, ptsUs * 1000)
                 core.swapBuffers(es)
                 encoderFrameCount.incrementAndGet()
+                encoderInputMeter.tick()
             }
         } catch (t: Throwable) {
             lastError = "Compositor draw failed: ${t.message}"

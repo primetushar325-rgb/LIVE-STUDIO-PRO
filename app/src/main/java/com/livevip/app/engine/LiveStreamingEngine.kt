@@ -58,9 +58,12 @@ class LiveStreamingEngine(private val context: Context) {
     private var videoConfig: Pair<ByteArray, ByteArray>? = null
     private var audioConfig: ByteArray? = null
     private var maxDurationMs: Long = 0
-    private var audioSampleRate = 44100
+    private var audioSampleRate = AudioPipeline.OUTPUT_SAMPLE_RATE
     private var audioChannels = 2
     @Volatile private var sourcePcmRate = 44100
+    @Volatile var serviceRunning: Boolean = false
+    @Volatile var screenOn: Boolean = true
+    @Volatile var activityVisible: Boolean = true
 
     private val _state = MutableStateFlow(StreamState.IDLE)
     val state: StateFlow<StreamState> = _state
@@ -228,8 +231,6 @@ class LiveStreamingEngine(private val context: Context) {
             // 2. audio
             val ap = AudioPipeline(
                 clock = clock,
-                sampleRate = audioSampleRate,
-                channelCount = 2,
                 micEnabled = profile.microphoneEnabled,
                 videoAudioEnabled = profile.videoAudioEnabled,
                 onAudioConfig = { cfg ->
@@ -298,7 +299,10 @@ class LiveStreamingEngine(private val context: Context) {
         _rtmpDiagnostics.value = t.diagnostics
         setState(StreamState.CONNECTED)
         setState(StreamState.PUBLISHING)
-        t.sendMetadata(p.resolution.width, p.resolution.height, p.fps, p.bitrateKbps, audioSampleRate)
+        t.sendMetadata(
+            p.resolution.width, p.resolution.height, p.fps, p.bitrateKbps,
+            AudioPipeline.OUTPUT_SAMPLE_RATE
+        )
         videoConfig?.let { (sps, pps) -> t.enqueueVideo(FlvPackager.avcSequenceHeader(sps, pps), 0) }
         audioConfig?.let { cfg -> t.enqueueAudio(FlvPackager.aacSequenceHeader(cfg), 0) }
         encoder?.requestKeyframe()
@@ -471,6 +475,27 @@ class LiveStreamingEngine(private val context: Context) {
             statusMessage = statusMessage,
             reconnectCount = reconnect.totalReconnects,
             networkTransport = network.transportName,
+            targetFps = profile?.fps ?: 0,
+            targetBitrateKbps = profile?.bitrateKbps ?: 0,
+            decoderFps = src?.decoderFps ?: 0f,
+            compositorFps = compositor.compositorMeter.also { it.refresh() }.fps,
+            encoderInputFps = compositor.encoderInputMeter.also { it.refresh() }.fps,
+            sentFps = t?.videoSendMeter?.also { it.refresh() }?.fps ?: 0f,
+            audioSampleRate = ap?.outputSampleRate ?: 0,
+            audioChannels = ap?.outputChannels ?: 0,
+            audioSourceSampleRate = ap?.sourceSampleRate ?: 0,
+            audioSourceChannels = ap?.sourceChannels ?: 0,
+            audioUnderruns = ap?.underruns ?: 0,
+            audioOverruns = ap?.overruns ?: 0,
+            audioSilenceFrames = ap?.silenceFramesInserted?.get() ?: 0,
+            audioEncodeErrors = ap?.encodeErrors?.get() ?: 0,
+            audioBufferPercent = ap?.bufferFillPercent ?: 0,
+            sendQueueBytes = t?.queueBytes ?: 0,
+            sendErrors = t?.sendErrors?.get() ?: 0,
+            networkConnected = network.networkAvailable,
+            serviceRunning = serviceRunning,
+            screenOn = screenOn,
+            activityVisible = activityVisible,
             sourceWidth = src?.sourceWidth ?: 0,
             sourceHeight = src?.sourceHeight ?: 0,
             outputWidth = compositor.composition.outputWidth,

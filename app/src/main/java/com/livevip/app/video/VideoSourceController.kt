@@ -10,6 +10,7 @@ import com.livevip.app.core.ErrorCode
 import com.livevip.app.core.MasterClock
 import com.livevip.app.data.LoopMode
 import com.livevip.app.data.VideoItem
+import com.livevip.app.engine.FpsMeter
 import com.livevip.app.gl.LiveCompositor
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicBoolean
@@ -48,6 +49,8 @@ class VideoSourceController(
     @Volatile var currentIndex = 0; private set
     @Volatile var loopIndex = 0; private set
     @Volatile var lastError: String? = null
+    val decoderMeter = FpsMeter()
+    val decoderFps: Float get() = decoderMeter.fps
 
     @Volatile private var playlist: List<VideoItem> = emptyList()
     @Volatile private var loopMode: LoopMode = LoopMode.UNLIMITED
@@ -237,11 +240,17 @@ class VideoSourceController(
                         if (firstPtsUs < 0) firstPtsUs = info.presentationTimeUs
                         currentPositionUs = info.presentationTimeUs - firstPtsUs
                         // Pace the source to real time against the single output timeline.
+                        // Precise frame pacing: coarse sleep, then a short spin for the
+                        // final sub-millisecond so 30 FPS sources really render at 30 FPS.
                         val targetUs = itemStartClockUs + currentPositionUs
-                        var waitUs = targetUs - clock.nowUs()
-                        while (waitUs > 2000 && running.get()) {
-                            Thread.sleep(minOf(waitUs / 1000, 50L))
-                            waitUs = targetUs - clock.nowUs()
+                        while (running.get()) {
+                            val waitUs = targetUs - clock.nowUs()
+                            if (waitUs <= 300) break
+                            if (waitUs > 3000) {
+                                Thread.sleep(minOf((waitUs - 2000) / 1000, 20L))
+                            } else {
+                                Thread.yield()
+                            }
                         }
                     }
                     decoder.releaseOutputBuffer(outIndex, render)
@@ -249,7 +258,10 @@ class VideoSourceController(
                         firstFrameReceived = true
                         events.onFirstFrame()
                     }
-                    if (render) lastFrameTimeMs = System.currentTimeMillis()
+                    if (render) {
+                        lastFrameTimeMs = System.currentTimeMillis()
+                        decoderMeter.tick(lastFrameTimeMs)
+                    }
                     if (eos) return
                 }
                 outIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
