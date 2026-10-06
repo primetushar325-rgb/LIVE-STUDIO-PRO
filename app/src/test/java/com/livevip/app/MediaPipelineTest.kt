@@ -68,7 +68,7 @@ class MediaPipelineTest {
         assertEquals(1L, b.underruns)
         b.write(ByteArray(512) { 7 })
         assertTrue(b.readFully(out, 512))
-        assertEquals(7, out[0])
+        assertEquals(7, out[0].toInt())
         assertEquals(512L, b.bytesRead)
     }
 
@@ -81,19 +81,19 @@ class MediaPipelineTest {
         assertEquals(256, b.available())
         val out = ByteArray(256)
         assertTrue(b.readFully(out, 256))
-        assertEquals(2, out[255])
+        assertEquals(2, out[255].toInt())
     }
 
     @Test
     fun fpsMeterMeasuresRealRate() {
         val m = FpsMeter()
         var t = 1_000_000L
-        repeat(31) {
+        repeat(40) {
             m.tick(t)
             t += 33
         }
         assertTrue("fps=${m.fps}", m.fps in 28f..32f)
-        assertEquals(31L, m.total)
+        assertEquals(40L, m.total)
         m.refresh(t + 5000)
         assertEquals(0f, m.fps, 0.001f)
     }
