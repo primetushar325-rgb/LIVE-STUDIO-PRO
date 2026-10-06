@@ -22,22 +22,24 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Set up Gradle (with cache)
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
+      - name: Show Android SDK location
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" || true
+
       - name: Unit tests
-        run: gradle --no-daemon testDebugUnitTest
+        run: bash scripts/ci-run.sh unit-tests gradle --no-daemon --stacktrace testDebugUnitTest
 
       - name: Lint
-        run: gradle --no-daemon lintDebug
+        run: bash scripts/ci-run.sh lint gradle --no-daemon lintDebug
 
       - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+        run: bash scripts/ci-run.sh assemble gradle --no-daemon --stacktrace assembleDebug
 
       - name: Verify APK exists
         run: |
