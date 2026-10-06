@@ -56,11 +56,74 @@ fun DiagnosticsScreen(
             )
         )
         StatBlock(
+            "HEALTH",
+            listOf(
+                "Video" to stats.videoHealth().name,
+                "Audio" to stats.audioHealth().name,
+                "Sync" to stats.syncHealth().name,
+                "Network" to stats.networkHealth().name,
+                "Background" to if (stats.serviceRunning) "GREEN" else "UNKNOWN"
+            )
+        )
+        StatBlock(
+            "VIDEO — PER STAGE FPS",
+            listOf(
+                "Target FPS" to "${stats.targetFps}",
+                "Decoder FPS" to String.format("%.2f", stats.decoderFps),
+                "Compositor FPS" to String.format("%.2f", stats.compositorFps),
+                "Encoder in FPS" to String.format("%.2f", stats.encoderInputFps),
+                "Encoder out FPS" to String.format("%.2f", stats.actualFps),
+                "Sent FPS" to String.format("%.2f", stats.sentFps)
+            )
+        )
+        StatBlock(
             "AUDIO",
             listOf(
                 "Audio" to if (stats.audioReady) "READY" else "NOT READY",
+                "Output" to if (stats.audioSampleRate > 0)
+                    "AAC-LC ${stats.audioSampleRate} Hz / ${stats.audioChannels} ch / 128 kbps" else "-",
+                "Source" to if (stats.audioSourceSampleRate > 0)
+                    "${stats.audioSourceSampleRate} Hz / ${stats.audioSourceChannels} ch" else "-",
                 "AAC frames" to "${stats.audioFrames}",
-                "A/V offset" to "${stats.avOffsetMs} ms"
+                "Audio packets sent" to "${stats.audioPacketsSent}",
+                "Buffer depth" to "${stats.audioBufferPercent}%",
+                "Underruns" to "${stats.audioUnderruns}",
+                "Overruns" to "${stats.audioOverruns}",
+                "Silence frames" to "${stats.audioSilenceFrames}",
+                "Encode errors" to "${stats.audioEncodeErrors}",
+                "Buffer state" to stats.audioBufferLabel()
+            )
+        )
+        StatBlock(
+            "SYNC",
+            listOf(
+                "A/V offset" to String.format("%+d ms", stats.avOffsetMs),
+                "Sync state" to stats.syncLabel()
+            )
+        )
+        StatBlock(
+            "NETWORK",
+            listOf(
+                "Network type" to stats.networkTransport,
+                "Link" to if (stats.networkConnected) "CONNECTED" else "DISCONNECTED",
+                "UPLOAD CAPACITY (measured peak)" to
+                    String.format("%.2f Mbps", stats.uploadCapacityBps / 1_000_000.0),
+                "Current stream bitrate" to String.format("%.2f Mbps", stats.bitrateBps / 1_000_000.0),
+                "Headroom" to String.format("%.2f Mbps", stats.headroomBps() / 1_000_000.0),
+                "Video packets sent" to "${stats.videoPacketsSent}",
+                "Send queue" to "${stats.sendQueueBytes / 1024} KB",
+                "Send errors" to "${stats.sendErrors}",
+                "Reconnects" to "${stats.reconnectCount}"
+            )
+        )
+        StatBlock(
+            "BACKGROUND",
+            listOf(
+                "Foreground service" to if (stats.serviceRunning) "RUNNING" else "STOPPED",
+                "Background mode" to if (!stats.activityVisible) "ACTIVE" else "INACTIVE",
+                "Screen" to if (stats.screenOn) "ON" else "OFF",
+                "Activity" to if (stats.activityVisible) "VISIBLE" else "BACKGROUND",
+                "Engine" to if (stats.state.isActive) "RUNNING" else "STOPPED"
             )
         )
         StatBlock(

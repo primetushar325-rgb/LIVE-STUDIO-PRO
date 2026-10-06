@@ -61,6 +61,10 @@ data class StreamStats(
     // --- transport ---
     val sendQueueBytes: Long = 0,
     val sendErrors: Long = 0,
+    val videoPacketsSent: Long = 0,
+    val audioPacketsSent: Long = 0,
+    /** Measured peak send throughput on the socket — NOT the configured bitrate. */
+    val uploadCapacityBps: Long = 0,
     val networkConnected: Boolean = false,
     // --- background ---
     val serviceRunning: Boolean = false,
@@ -96,6 +100,22 @@ data class StreamStats(
         sendErrors > 0 || reconnectCount > 0 -> HealthLevel.YELLOW
         sendQueueBytes > 1_500_000 -> HealthLevel.RED
         else -> HealthLevel.GREEN
+    }
+
+    /** Measured headroom between upload capacity and the current stream bitrate. */
+    fun headroomBps(): Long = (uploadCapacityBps - bitrateBps).coerceAtLeast(0)
+
+    fun syncLabel(): String = when (syncHealth()) {
+        HealthLevel.RED -> "AV_SYNC_ERROR"
+        HealthLevel.YELLOW -> "AV_SYNC_WARNING"
+        else -> "OK"
+    }
+
+    fun audioBufferLabel(): String = when {
+        audioOverruns > 0 && audioUnderruns > 0 -> "AUDIO_BUFFER_UNDERRUN + OVERRUN"
+        audioOverruns > 0 -> "AUDIO_BUFFER_OVERRUN"
+        audioUnderruns > 0 -> "AUDIO_BUFFER_UNDERRUN"
+        else -> "OK"
     }
 
     fun elapsedLabel(): String = formatDuration(elapsedMs)

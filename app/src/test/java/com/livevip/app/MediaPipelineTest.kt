@@ -110,3 +110,37 @@ class MediaPipelineTest {
         assertEquals(21333L, 1024L * 1_000_000L / 48_000L)
     }
 }
+
+class StreamStatsHealthTest {
+    @Test
+    fun healthAndLabelsComeFromRealCounters() {
+        val live = com.livevip.app.engine.StreamStats(
+            state = com.livevip.app.core.StreamState.STREAMING,
+            targetFps = 30,
+            sentFps = 29.5f,
+            audioFrames = 500,
+            avOffsetMs = 20,
+            bitrateBps = 2_000_000,
+            uploadCapacityBps = 5_000_000
+        )
+        assertEquals(com.livevip.app.engine.HealthLevel.GREEN, live.videoHealth())
+        assertEquals(com.livevip.app.engine.HealthLevel.GREEN, live.audioHealth())
+        assertEquals(com.livevip.app.engine.HealthLevel.GREEN, live.syncHealth())
+        assertEquals(3_000_000L, live.headroomBps())
+        assertEquals("OK", live.syncLabel())
+
+        val degraded = live.copy(sentFps = 19f, audioUnderruns = 37, avOffsetMs = 800)
+        assertEquals(com.livevip.app.engine.HealthLevel.RED, degraded.videoHealth())
+        assertEquals(com.livevip.app.engine.HealthLevel.RED, degraded.audioHealth())
+        assertEquals("AV_SYNC_ERROR", degraded.syncLabel())
+        assertEquals("AUDIO_BUFFER_UNDERRUN", degraded.audioBufferLabel())
+    }
+
+    @Test
+    fun offlineStateNeverReportsGreen() {
+        val off = com.livevip.app.engine.StreamStats(state = com.livevip.app.core.StreamState.IDLE)
+        assertEquals(com.livevip.app.engine.HealthLevel.UNKNOWN, off.videoHealth())
+        assertEquals(com.livevip.app.engine.HealthLevel.UNKNOWN, off.audioHealth())
+        assertEquals(0L, off.headroomBps())
+    }
+}

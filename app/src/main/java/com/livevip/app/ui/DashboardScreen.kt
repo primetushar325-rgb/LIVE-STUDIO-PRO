@@ -266,7 +266,12 @@ private fun LiveControlPanel(
                 StatRow("Audio overruns", "${stats.audioOverruns}")
                 StatRow("Audio silence frames", "${stats.audioSilenceFrames}")
                 StatRow("Audio encode errors", "${stats.audioEncodeErrors}")
-                StatRow("A/V offset", String.format("%+d ms", stats.avOffsetMs))
+                StatRow("A/V offset", String.format("%+d ms (%s)", stats.avOffsetMs, stats.syncLabel()))
+                StatRow(
+                    "Upload capacity",
+                    String.format("%.2f Mbps measured", stats.uploadCapacityBps / 1_000_000.0)
+                )
+                StatRow("Headroom", String.format("%.2f Mbps", stats.headroomBps() / 1_000_000.0))
                 StatRow("Network type", stats.networkTransport)
                 StatRow("Network link", if (stats.networkConnected) "CONNECTED" else "DOWN")
                 StatRow("Send queue", formatBytes(stats.sendQueueBytes))

@@ -29,6 +29,10 @@ class RtmpTransport(
     val packetsSent = AtomicLong(0)
     val droppedPackets = AtomicLong(0)
     val sendErrors = AtomicLong(0)
+    val videoPacketsSent = AtomicLong(0)
+    val audioPacketsSent = AtomicLong(0)
+    /** Highest sustained send rate actually measured on the socket (upload capacity estimate). */
+    @Volatile var peakSendBitrateBps: Long = 0; private set
     val videoSendMeter = FpsMeter()
     @Volatile var queueBytes: Long = 0; private set
     @Volatile var currentBitrateBps: Long = 0; private set
@@ -94,8 +98,10 @@ class RtmpTransport(
                 if (packet.video) {
                     c.sendVideo(packet.payload, packet.timestampMs)
                     videoSendMeter.tick()
+                    videoPacketsSent.incrementAndGet()
                 } else {
                     c.sendAudio(packet.payload, packet.timestampMs)
+                    audioPacketsSent.incrementAndGet()
                 }
                 queueBytes = (queueBytes - packet.payload.size).coerceAtLeast(0)
 
@@ -106,6 +112,7 @@ class RtmpTransport(
                 val elapsed = now - windowStartMs
                 if (elapsed >= 1000) {
                     currentBitrateBps = windowBytes * 8 * 1000 / elapsed
+                    if (currentBitrateBps > peakSendBitrateBps) peakSendBitrateBps = currentBitrateBps
                     windowStartMs = now
                     windowBytes = 0
                 }
