@@ -22,7 +22,12 @@ import com.livevip.app.engine.StreamStats
  * Credentials are never displayed.
  */
 @Composable
-fun DiagnosticsScreen(stats: StreamStats, logs: List<String>, onBack: () -> Unit) {
+fun DiagnosticsScreen(
+    stats: StreamStats,
+    rtmp: com.livevip.app.rtmp.RtmpDiagnostics,
+    logs: List<String>,
+    onBack: () -> Unit
+) {
     Column(Modifier.fillMaxSize().padding(14.dp).verticalScroll(rememberScrollState())) {
         TextButton(onClick = onBack) { Text("< BACK") }
         Text("DEVELOPER DIAGNOSTICS", style = MaterialTheme.typography.headlineSmall)
@@ -59,7 +64,53 @@ fun DiagnosticsScreen(stats: StreamStats, logs: List<String>, onBack: () -> Unit
             )
         )
         StatBlock(
-            "TRANSPORT",
+            "TRANSPORT — CONNECTION",
+            listOf(
+                "Mode" to rtmp.mode,
+                "Protocol" to rtmp.protocol,
+                "Host" to rtmp.host,
+                "Port" to "${rtmp.port}",
+                "Application" to rtmp.application,
+                "URL validation" to rtmp.urlValidation,
+                "DNS" to rtmp.dnsResult,
+                "Socket" to rtmp.socketResult,
+                "TLS" to rtmp.tlsResult,
+                "Handshake" to rtmp.handshakeResult,
+                "Stream key" to rtmp.maskedStreamKey
+            )
+        )
+        StatBlock(
+            "RTMP — PROTOCOL",
+            listOf(
+                "connect sent" to if (rtmp.connectSent) "YES" else "NO",
+                "connect result" to rtmp.connectResultCode,
+                "connect description" to rtmp.connectDescription,
+                "createStream txId" to "${rtmp.createStreamTxId}",
+                "createStream result" to rtmp.createStreamResult,
+                "createStream error" to rtmp.createStreamErrorCode,
+                "createStream detail" to rtmp.createStreamErrorDescription,
+                "NetStream id" to "${rtmp.streamId}",
+                "publish result" to rtmp.publishResult,
+                "publish status" to rtmp.publishStatusCode,
+                "publish level" to rtmp.publishStatusLevel,
+                "publish detail" to rtmp.publishStatusDescription,
+                "failure stage" to rtmp.failureStage,
+                "last exception" to rtmp.lastException
+            )
+        )
+        SectionTitle("RTMP SERVER MESSAGES")
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(10.dp)) {
+                if (rtmp.serverMessages.isEmpty()) {
+                    Text("No server messages yet.", style = MaterialTheme.typography.bodySmall)
+                }
+                rtmp.serverMessages.takeLast(25).reversed().forEach {
+                    Text(it, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        StatBlock(
+            "TRANSPORT — METRICS",
             listOf(
                 "RTMP" to if (stats.rtmpPublishing) "PUBLISHING" else
                     if (stats.rtmpConnected) "CONNECTED" else "DISCONNECTED",

@@ -137,4 +137,70 @@ object Amf0 {
         }
         return result
     }
+
+    /** Full AMF0 value decoder: numbers, strings, booleans, nulls and objects/arrays. */
+    fun decodeAll(data: ByteArray): List<Any?> {
+        val values = mutableListOf<Any?>()
+        var i = 0
+        while (i < data.size) {
+            val (value, next) = decodeValue(data, i) ?: break
+            values.add(value)
+            if (next <= i) break
+            i = next
+        }
+        return values
+    }
+
+    private fun decodeValue(data: ByteArray, start: Int): Pair<Any?, Int>? {
+        if (start >= data.size) return null
+        return when (data[start].toInt() and 0xFF) {
+            NUMBER -> {
+                if (start + 9 > data.size) return null
+                var bits = 0L
+                for (b in 1..8) bits = (bits shl 8) or (data[start + b].toLong() and 0xFF)
+                Double.fromBits(bits) to (start + 9)
+            }
+            BOOLEAN -> {
+                if (start + 2 > data.size) return null
+                (data[start + 1].toInt() != 0) to (start + 2)
+            }
+            STRING -> {
+                if (start + 3 > data.size) return null
+                val len = ((data[start + 1].toInt() and 0xFF) shl 8) or (data[start + 2].toInt() and 0xFF)
+                if (start + 3 + len > data.size) return null
+                String(data, start + 3, len, Charsets.UTF_8) to (start + 3 + len)
+            }
+            NULL, 0x06 -> null to (start + 1)
+            OBJECT -> decodeObject(data, start + 1)
+            ECMA_ARRAY -> {
+                if (start + 5 > data.size) return null
+                decodeObject(data, start + 5)
+            }
+            OBJECT_END -> null to (start + 1)
+            else -> null to (start + 1)
+        }
+    }
+
+    private fun decodeObject(data: ByteArray, start: Int): Pair<Map<String, Any?>, Int> {
+        val map = LinkedHashMap<String, Any?>()
+        var i = start
+        while (i + 2 <= data.size) {
+            val len = ((data[i].toInt() and 0xFF) shl 8) or (data[i + 1].toInt() and 0xFF)
+            if (len == 0) {
+                // 0x00 0x00 0x09 terminator
+                return map to minOf(i + 3, data.size)
+            }
+            if (i + 2 + len > data.size) break
+            val key = String(data, i + 2, len, Charsets.UTF_8)
+            val decoded = decodeValue(data, i + 2 + len) ?: break
+            map[key] = decoded.first
+            if (decoded.second <= i) break
+            i = decoded.second
+        }
+        return map to i
+    }
+
+    /** Finds the first AMF0 object containing a "code" property (NetStatus object). */
+    fun findStatusObject(values: List<Any?>): Map<String, Any?>? =
+        values.filterIsInstance<Map<String, Any?>>().firstOrNull { it.containsKey("code") }
 }

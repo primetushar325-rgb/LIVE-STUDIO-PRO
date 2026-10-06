@@ -30,6 +30,7 @@ class RtmpTransport(
     @Volatile var currentBitrateBps: Long = 0; private set
     @Volatile var firstMediaSent = false; private set
     @Volatile var lastError: String? = null
+    @Volatile var diagnostics = RtmpDiagnostics(); private set
 
     private var windowStartMs = 0L
     private var windowBytes = 0L
@@ -50,7 +51,8 @@ class RtmpTransport(
                     onConnectionLost(code)
                 }
             },
-            onLog = onLog
+            onLog = onLog,
+            onDiagnostics = { diagnostics = it }
         )
         c.connect()
         client = c

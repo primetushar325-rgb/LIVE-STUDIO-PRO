@@ -16,6 +16,7 @@ import com.livevip.app.gl.LiveCompositor
 import com.livevip.app.audio.AudioPipeline
 import com.livevip.app.encoder.VideoEncoderController
 import com.livevip.app.rtmp.FlvPackager
+import com.livevip.app.rtmp.RtmpDiagnostics
 import com.livevip.app.rtmp.RtmpTransport
 import com.livevip.app.video.PlaybackEvents
 import com.livevip.app.video.VideoSourceController
@@ -66,6 +67,12 @@ class LiveStreamingEngine(private val context: Context) {
 
     private val _stats = MutableStateFlow(StreamStats())
     val stats: StateFlow<StreamStats> = _stats
+
+    private val _rtmpDiagnostics = MutableStateFlow(RtmpDiagnostics())
+    val rtmpDiagnostics: StateFlow<RtmpDiagnostics> = _rtmpDiagnostics
+
+    /** Live timer starts ONLY when real media is accepted by the transport. */
+    @Volatile private var streamingStartedAtMs: Long = 0
 
     private val _logs = MutableStateFlow<List<String>>(emptyList())
     val logs: StateFlow<List<String>> = _logs
@@ -184,6 +191,7 @@ class LiveStreamingEngine(private val context: Context) {
         liveRequested.set(true)
         lastError = null
         statusMessage = null
+        streamingStartedAtMs = 0L
         reconnect.reset()
         Thread({ prepareAndStart(profile) }, "LiveStart").start()
     }
@@ -287,7 +295,9 @@ class LiveStreamingEngine(private val context: Context) {
         )
         transport = t
         t.connect(p.serverUrl, streamKey)
+        _rtmpDiagnostics.value = t.diagnostics
         setState(StreamState.CONNECTED)
+        setState(StreamState.PUBLISHING)
         t.sendMetadata(p.resolution.width, p.resolution.height, p.fps, p.bitrateKbps, audioSampleRate)
         videoConfig?.let { (sps, pps) -> t.enqueueVideo(FlvPackager.avcSequenceHeader(sps, pps), 0) }
         audioConfig?.let { cfg -> t.enqueueAudio(FlvPackager.aacSequenceHeader(cfg), 0) }
@@ -308,7 +318,10 @@ class LiveStreamingEngine(private val context: Context) {
         }
         t.enqueueVideo(FlvPackager.videoTag(data, keyframe), ptsUs / 1000)
         if (_state.value == StreamState.SENDING || _state.value == StreamState.CONNECTED) {
-            if (t.packetsSent.get() > 5) setState(StreamState.STREAMING)
+            if (t.packetsSent.get() > 5) {
+                if (streamingStartedAtMs == 0L) streamingStartedAtMs = System.currentTimeMillis()
+                setState(StreamState.STREAMING)
+            }
         }
     }
 
@@ -368,7 +381,7 @@ class LiveStreamingEngine(private val context: Context) {
             try {
                 while (liveRequested.get()) {
                     Thread.sleep(1000)
-                    if (maxDurationMs > 0 && clock.elapsedMs() >= maxDurationMs) {
+                    if (maxDurationMs > 0 && liveElapsedMs() >= maxDurationMs && streamingStartedAtMs != 0L) {
                         statusMessage = "Maximum live duration reached."
                         log("Maximum live duration reached — stopping gracefully")
                         stopLive(auto = true)
@@ -413,14 +426,19 @@ class LiveStreamingEngine(private val context: Context) {
         }, "StatsPump").also { it.start() }
     }
 
+    /** 00:00:00 until actual STREAMING; never a fake running timer. */
+    private fun liveElapsedMs(): Long =
+        if (streamingStartedAtMs == 0L) 0L else System.currentTimeMillis() - streamingStartedAtMs
+
     private fun publishStats() {
         val src = videoSource
         val enc = encoder
         val t = transport
         val ap = audio
+        transport?.let { _rtmpDiagnostics.value = it.diagnostics }
         _stats.value = StreamStats(
             state = _state.value,
-            elapsedMs = clock.elapsedMs(),
+            elapsedMs = liveElapsedMs(),
             maxDurationMs = maxDurationMs,
             videoReady = src?.decoderInitialized == true,
             decoderReady = src?.decoderInitialized == true,
@@ -493,6 +511,7 @@ class LiveStreamingEngine(private val context: Context) {
         audioConfig = null
         compositor.previewFrameCount.set(0)
         compositor.encoderFrameCount.set(0)
+        streamingStartedAtMs = 0L
     }
 
     /** Full teardown, used when the service itself goes away. */
@@ -529,7 +548,7 @@ class LiveStreamingEngine(private val context: Context) {
     }
 
     private fun log(message: String) {
-        val line = "${StreamStats.formatDuration(clock.elapsedMs())}  $message"
+        val line = "${StreamStats.formatDuration(liveElapsedMs())}  $message"
         _logs.value = (_logs.value + line).takeLast(200)
         Log.i(TAG, message)
     }

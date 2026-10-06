@@ -94,6 +94,7 @@ class MainActivity : ComponentActivity() {
         val state by engine.state.collectAsStateWithLifecycle()
         val stats by engine.stats.collectAsStateWithLifecycle()
         val logs by engine.logs.collectAsStateWithLifecycle()
+        val rtmpDiag by engine.rtmpDiagnostics.collectAsStateWithLifecycle()
         val settings by settingsStore.state.collectAsStateWithLifecycle()
         val context = this
 
@@ -171,6 +172,7 @@ class MainActivity : ComponentActivity() {
 
             is Screen.Diagnostics -> DiagnosticsScreen(
                 stats = stats,
+                rtmp = rtmpDiag,
                 logs = logs,
                 onBack = { screen = Screen.Home }
             )
