@@ -55,7 +55,8 @@ fun HomeScreen(
             }
         }
         Text(
-            "Direct RTMP / RTMPS mobile broadcasting",
+            "Direct RTMP / RTMPS mobile broadcasting  •  build " +
+                com.livevip.app.BuildConfig.VERSION_NAME,
             style = MaterialTheme.typography.bodySmall
         )
         Spacer(Modifier.height(16.dp))

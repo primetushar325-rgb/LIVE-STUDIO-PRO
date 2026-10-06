@@ -129,7 +129,8 @@ fun SettingsScreen(
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(12.dp)) {
                 StatRow("App", "LIVE VIP")
-                StatRow("Version", "1.0.0")
+                StatRow("Version", com.livevip.app.BuildConfig.VERSION_NAME)
+                StatRow("Build", "#" + com.livevip.app.BuildConfig.VERSION_CODE)
                 StatRow("Transport", "Direct RTMP / RTMPS (no relay)")
                 StatRow("Video", "Hardware H.264 (MediaCodec, CBR)")
                 StatRow("Audio", "AAC LC 44.1 kHz")
