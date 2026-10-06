@@ -58,3 +58,5 @@ H.264 + AAC output, direct RTMP/RTMPS to YouTube Live Control Room, playlist
 transition and 3-loop test without encoder/transport restart, reconnect after
 airplane-mode toggle, background + screen-off streaming, automatic stop at the
 configured maximum duration, 1 hour continuous stability run.
+
+<!-- build: v1.4.0-mediafix rebuild 2026-10-06T21:42Z -->
