@@ -244,7 +244,10 @@ class LiveStreamingEngine(private val context: Context) {
             )
             audio = ap
             ap.prepare()
-            if (!ap.audioReady) throw StreamException(ErrorCode.AUDIO_INIT_FAILED, "AAC encoder unavailable")
+            if (!ap.audioReady) throw StreamException(
+                ErrorCode.AUDIO_INIT_FAILED,
+                ap.lastError ?: "AAC encoder unavailable"
+            )
             ap.start()
             setState(StreamState.AUDIO_READY)
 
@@ -302,7 +305,7 @@ class LiveStreamingEngine(private val context: Context) {
         setState(StreamState.PUBLISHING)
         t.sendMetadata(
             p.resolution.width, p.resolution.height, p.fps, p.bitrateKbps,
-            AudioPipeline.OUTPUT_SAMPLE_RATE
+            audio?.outputSampleRate ?: AudioPipeline.OUTPUT_SAMPLE_RATE
         )
         videoConfig?.let { (sps, pps) -> t.enqueueVideo(FlvPackager.avcSequenceHeader(sps, pps), 0) }
         audioConfig?.let { cfg -> t.enqueueAudio(FlvPackager.aacSequenceHeader(cfg), 0) }
@@ -492,6 +495,8 @@ class LiveStreamingEngine(private val context: Context) {
             audioSilenceFrames = ap?.silenceFramesInserted?.get() ?: 0,
             audioEncodeErrors = ap?.encodeErrors?.get() ?: 0,
             audioBufferPercent = ap?.bufferFillPercent ?: 0,
+            audioConfigPath = ap?.configPath ?: "-",
+            encoderConfigPath = enc?.configPath ?: "-",
             sendQueueBytes = t?.queueBytes ?: 0,
             sendErrors = t?.sendErrors?.get() ?: 0,
             videoPacketsSent = t?.videoPacketsSent?.get() ?: 0,

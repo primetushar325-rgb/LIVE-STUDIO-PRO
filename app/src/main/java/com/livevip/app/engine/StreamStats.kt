@@ -60,6 +60,9 @@ data class StreamStats(
     val audioSilenceFrames: Long = 0,
     val audioEncodeErrors: Long = 0,
     val audioBufferPercent: Int = 0,
+    /** Exact encoder configuration that succeeded (never a generic message). */
+    val audioConfigPath: String = "-",
+    val encoderConfigPath: String = "-",
     // --- transport ---
     val sendQueueBytes: Long = 0,
     val sendErrors: Long = 0,

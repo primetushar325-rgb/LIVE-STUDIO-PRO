@@ -33,6 +33,8 @@ class VideoEncoderController(
     @Volatile var encoderReady = false; private set
     @Volatile var lastError: String? = null
     @Volatile var codecName: String = "-"
+    /** Which encoder configuration actually succeeded — shown in diagnostics. */
+    @Volatile var configPath: String = "-"
     val encodedFrameCount = AtomicLong(0)
     val encodedBytes = AtomicLong(0)
     val droppedFrames = AtomicLong(0)
@@ -40,6 +42,22 @@ class VideoEncoderController(
 
     private var fpsWindowStart = 0L
     private var fpsWindowFrames = 0L
+
+    /** Common part of both encoder configurations (unchanged from the working build). */
+    private fun baseFormat(): MediaFormat =
+        MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+            setInteger(
+                MediaFormat.KEY_COLOR_FORMAT,
+                MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+            )
+            setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
+            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, keyframeIntervalSec)
+            setInteger(
+                MediaFormat.KEY_BITRATE_MODE,
+                MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR
+            )
+        }
 
     /** Pick a hardware AVC encoder; returns null if only software is available. */
     private fun selectHardwareEncoder(): String? = runCatching {
@@ -63,51 +81,85 @@ class VideoEncoderController(
         try {
             val hwName = selectHardwareEncoder()
             val highProfileSupported = hwName != null && supportsHighProfile(hwName)
-            val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-                setInteger(
-                    MediaFormat.KEY_COLOR_FORMAT,
-                    MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
-                )
-                setInteger(MediaFormat.KEY_BIT_RATE, bitrateBps)
-                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, keyframeIntervalSec)
-                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-                // H.264 High profile when the hardware encoder really advertises it,
-                // otherwise stay on Baseline (never a software fallback).
-                setInteger(
-                    MediaFormat.KEY_PROFILE,
-                    if (highProfileSupported) MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
-                    else MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
-                )
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+
+            // STAGE 1: preferred live configuration.
+            // STAGE 2: the exact configuration the previously publishing build used.
+            // A device that rejects stage 1 must NOT fail START LIVE.
+            var c: MediaCodec? = null
+            var stageError: String? = null
+            if (hwName != null) {
+                try {
+                    val preferred = baseFormat().apply {
+                        setInteger(
+                            MediaFormat.KEY_PROFILE,
+                            if (highProfileSupported) MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
+                            else MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+                        )
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                            setInteger(
+                                MediaFormat.KEY_LEVEL,
+                                if (highProfileSupported) MediaCodecInfo.CodecProfileLevel.AVCLevel4
+                                else MediaCodecInfo.CodecProfileLevel.AVCLevel31
+                            )
+                        }
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                            setInteger(MediaFormat.KEY_LATENCY, 1)
+                            setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
+                            setInteger(MediaFormat.KEY_PRIORITY, 0)
+                        }
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N_MR1) {
+                            setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                        }
+                    }
+                    val candidate = MediaCodec.createByCodecName(hwName)
+                    try {
+                        candidate.configure(preferred, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                        c = candidate
+                        configPath = "hw $hwName " +
+                            (if (highProfileSupported) "High/L4" else "Baseline/L3.1") + " CBR"
+                    } catch (t: Throwable) {
+                        candidate.release()
+                        throw t
+                    }
+                } catch (t: Throwable) {
+                    stageError = "preferred(${hwName}): ${t.javaClass.simpleName}: ${t.message}"
+                }
+            }
+
+            if (c == null) {
+                // Legacy fallback — identical to the configuration that published fine.
+                val legacy = baseFormat().apply {
                     setInteger(
-                        MediaFormat.KEY_LEVEL,
-                        if (highProfileSupported) MediaCodecInfo.CodecProfileLevel.AVCLevel4
-                        else MediaCodecInfo.CodecProfileLevel.AVCLevel31
+                        MediaFormat.KEY_PROFILE,
+                        MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline
+                    )
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                        setInteger(MediaFormat.KEY_LEVEL, MediaCodecInfo.CodecProfileLevel.AVCLevel31)
+                    }
+                }
+                val candidate = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                try {
+                    candidate.configure(legacy, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    c = candidate
+                    configPath = "legacy Baseline/L3.1 CBR" +
+                        (if (stageError != null) " (after $stageError)" else "")
+                } catch (t: Throwable) {
+                    candidate.release()
+                    throw StreamException(
+                        ErrorCode.ENCODER_CONFIG_FAILED,
+                        "${t.javaClass.simpleName}: ${t.message}" +
+                            (if (stageError != null) " | $stageError" else ""),
+                        t
                     )
                 }
-                // Live: no B-frames, encode in real time, low latency where supported.
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
-                    setInteger(MediaFormat.KEY_LATENCY, 1)
-                    setInteger(MediaFormat.KEY_OPERATING_RATE, fps)
-                    setInteger(MediaFormat.KEY_PRIORITY, 0)
-                }
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N_MR1) {
-                    setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
-                }
             }
-            val c = if (hwName != null) MediaCodec.createByCodecName(hwName)
-            else MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            codecName = runCatching { c.name }.getOrDefault("h264")
-            try {
-                c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            } catch (t: Throwable) {
-                c.release()
-                throw StreamException(ErrorCode.ENCODER_CONFIG_FAILED, t.message, t)
-            }
-            inputSurface = c.createInputSurface()
-            c.start()
-            codec = c
+            val ready = c ?: throw StreamException(
+                ErrorCode.ENCODER_UNAVAILABLE, "no H.264 encoder could be configured"
+            )
+            codecName = runCatching { ready.name }.getOrDefault("h264")
+            inputSurface = ready.createInputSurface()
+            ready.start()
+            codec = ready
             encoderReady = true
         } catch (e: StreamException) {
             lastError = e.message

@@ -31,6 +31,7 @@ class AudioPipeline(
     private val onError: (ErrorCode, String) -> Unit
 ) {
     companion object {
+        /** Preferred output format. The encoder may negotiate down — see [outputSampleRate]. */
         const val OUTPUT_SAMPLE_RATE = 48_000
         const val OUTPUT_CHANNELS = 2
         const val OUTPUT_BITRATE = 128_000
@@ -39,7 +40,17 @@ class AudioPipeline(
         private const val RING_SECONDS = 1.5f
     }
 
-    private val bytesPerFrame = FRAME_SAMPLES * OUTPUT_CHANNELS * 2
+    /**
+     * ACTUAL negotiated output format. 48 kHz stereo is only preferred: if the device
+     * AAC encoder refuses it we fall back instead of failing START LIVE, exactly like
+     * the build that was publishing successfully.
+     */
+    @Volatile var outputSampleRate = OUTPUT_SAMPLE_RATE; private set
+    @Volatile var outputChannels = OUTPUT_CHANNELS; private set
+    /** Which encoder configuration actually succeeded — shown in diagnostics. */
+    @Volatile var configPath: String = "-"; private set
+
+    private var bytesPerFrame = FRAME_SAMPLES * OUTPUT_CHANNELS * 2
     private val ringCapacity = (OUTPUT_SAMPLE_RATE * OUTPUT_CHANNELS * 2 * RING_SECONDS).toInt()
 
     private var codec: MediaCodec? = null
@@ -66,30 +77,52 @@ class AudioPipeline(
     val overruns: Long get() = videoRing.overruns + micRing.overruns
     val bufferFillPercent: Int
         get() = ((if (videoAudioEnabled) videoRing.fillRatio() else micRing.fillRatio()) * 100).toInt()
-    val outputSampleRate: Int get() = OUTPUT_SAMPLE_RATE
-    val outputChannels: Int get() = OUTPUT_CHANNELS
     @Volatile var sourceSampleRate: Int = 0; private set
     @Volatile var sourceChannels: Int = 0; private set
 
     fun prepare() {
-        try {
-            val format = MediaFormat.createAudioFormat(
-                MediaFormat.MIMETYPE_AUDIO_AAC, OUTPUT_SAMPLE_RATE, OUTPUT_CHANNELS
-            ).apply {
-                setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-                setInteger(MediaFormat.KEY_BIT_RATE, OUTPUT_BITRATE)
-                setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, bytesPerFrame * 4)
+        // Preferred first, then the formats the previously working build used.
+        val candidates = listOf(
+            OUTPUT_SAMPLE_RATE to OUTPUT_CHANNELS,
+            44_100 to 2,
+            OUTPUT_SAMPLE_RATE to 1,
+            44_100 to 1
+        )
+        val failures = StringBuilder()
+        for ((rate, channels) in candidates) {
+            val frameBytes = FRAME_SAMPLES * channels * 2
+            var c: MediaCodec? = null
+            try {
+                val format = MediaFormat.createAudioFormat(
+                    MediaFormat.MIMETYPE_AUDIO_AAC, rate, channels
+                ).apply {
+                    setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+                    setInteger(MediaFormat.KEY_BIT_RATE, OUTPUT_BITRATE)
+                    setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, frameBytes * 4)
+                }
+                c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+                c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                c.start()
+                codec = c
+                outputSampleRate = rate
+                outputChannels = channels
+                bytesPerFrame = frameBytes
+                videoResampler = null
+                configPath = "AAC-LC ${rate} Hz / ${channels} ch / ${OUTPUT_BITRATE / 1000} kbps"
+                audioReady = true
+                lastError = null
+                onAudioConfig(audioSpecificConfig())
+                return
+            } catch (t: Throwable) {
+                runCatching { c?.release() }
+                failures.append(rate).append("Hz/").append(channels).append("ch: ")
+                    .append(t.javaClass.simpleName).append(": ").append(t.message).append("; ")
             }
-            val c = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-            c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            c.start()
-            codec = c
-            audioReady = true
-            onAudioConfig(audioSpecificConfig())
-        } catch (t: Throwable) {
-            lastError = t.message
-            onError(ErrorCode.AUDIO_ENCODER_FAILED, t.message ?: "AAC encoder failed")
         }
+        audioReady = false
+        configPath = "FAILED"
+        lastError = failures.toString()
+        onError(ErrorCode.AUDIO_ENCODER_FAILED, "AAC encoder rejected every format -> $failures")
     }
 
     @SuppressLint("MissingPermission")
@@ -110,7 +143,7 @@ class AudioPipeline(
             videoSrcChannels = channelsIn
             sourceSampleRate = sampleRateIn
             sourceChannels = channelsIn
-            videoResampler = Resampler(sampleRateIn, channelsIn, OUTPUT_SAMPLE_RATE, OUTPUT_CHANNELS)
+            videoResampler = Resampler(sampleRateIn, channelsIn, outputSampleRate, outputChannels)
         }
         val converted = videoResampler!!.process(data, size)
         if (converted.isNotEmpty()) videoRing.write(converted)
@@ -121,11 +154,11 @@ class AudioPipeline(
         try {
             val channelMask = AudioFormat.CHANNEL_IN_STEREO
             val minBuf = AudioRecord.getMinBufferSize(
-                OUTPUT_SAMPLE_RATE, channelMask, AudioFormat.ENCODING_PCM_16BIT
+                outputSampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT
             )
             val record = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
-                OUTPUT_SAMPLE_RATE,
+                outputSampleRate,
                 channelMask,
                 AudioFormat.ENCODING_PCM_16BIT,
                 maxOf(minBuf, bytesPerFrame * 8)
@@ -161,7 +194,7 @@ class AudioPipeline(
         try {
             while (running.get()) {
                 // Pace: do not run ahead of the output timeline.
-                val expectedSamples = clock.nowUs() * OUTPUT_SAMPLE_RATE / 1_000_000
+                val expectedSamples = clock.nowUs() * outputSampleRate / 1_000_000
                 if (samplesSent > expectedSamples + FRAME_SAMPLES * 2) {
                     Thread.sleep(5)
                     continue
@@ -198,7 +231,7 @@ class AudioPipeline(
                     val buffer = c.getInputBuffer(index)
                     buffer?.clear()
                     buffer?.put(outChunk)
-                    val ptsUs = clock.audioPts(samplesSent * 1_000_000 / OUTPUT_SAMPLE_RATE)
+                    val ptsUs = clock.audioPts(samplesSent * 1_000_000 / outputSampleRate)
                     c.queueInputBuffer(index, 0, bytesPerFrame, ptsUs, 0)
                     samplesSent += FRAME_SAMPLES
                 }
@@ -278,14 +311,14 @@ class AudioPipeline(
 
     /** AAC-LC AudioSpecificConfig matching the ACTUAL encoder format (48 kHz stereo). */
     private fun audioSpecificConfig(): ByteArray {
-        val freqIndex = when (OUTPUT_SAMPLE_RATE) {
+        val freqIndex = when (outputSampleRate) {
             96000 -> 0; 88200 -> 1; 64000 -> 2; 48000 -> 3; 44100 -> 4; 32000 -> 5
             24000 -> 6; 22050 -> 7; 16000 -> 8; 12000 -> 9; 11025 -> 10; 8000 -> 11
             else -> 3
         }
         val objectType = 2 // AAC LC
         val b0 = ((objectType shl 3) or (freqIndex shr 1)).toByte()
-        val b1 = (((freqIndex and 1) shl 7) or (OUTPUT_CHANNELS shl 3)).toByte()
+        val b1 = (((freqIndex and 1) shl 7) or (outputChannels shl 3)).toByte()
         return byteArrayOf(b0, b1)
     }
 }

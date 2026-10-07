@@ -48,6 +48,7 @@ fun DiagnosticsScreen(
             listOf(
                 "Encoder" to if (stats.encoderReady) "READY" else "NOT READY",
                 "Codec" to stats.encoderName,
+                "Config path" to stats.encoderConfigPath,
                 "Output size" to "${stats.outputWidth}x${stats.outputHeight}",
                 "Encoded frames" to "${stats.encodedFrames}",
                 "Encoded bytes" to "${stats.encodedBytes}",
@@ -85,6 +86,7 @@ fun DiagnosticsScreen(
                     "AAC-LC ${stats.audioSampleRate} Hz / ${stats.audioChannels} ch / 128 kbps" else "-",
                 "Source" to if (stats.audioSourceSampleRate > 0)
                     "${stats.audioSourceSampleRate} Hz / ${stats.audioSourceChannels} ch" else "-",
+                "Config path" to stats.audioConfigPath,
                 "AAC frames" to "${stats.audioFrames}",
                 "Audio packets sent" to "${stats.audioPacketsSent}",
                 "Buffer depth" to "${stats.audioBufferPercent}%",
