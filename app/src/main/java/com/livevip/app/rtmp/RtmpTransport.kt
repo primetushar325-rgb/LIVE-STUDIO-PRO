@@ -1,0 +1,170 @@
+package com.livevip.app.rtmp
+
+import com.livevip.app.core.ErrorCode
+import com.livevip.app.core.StreamException
+import com.livevip.app.engine.FpsMeter
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * Transport layer: owns exactly ONE RtmpClient socket at a time and a single
+ * sender thread. All reported numbers are measured, never simulated.
+ */
+class RtmpTransport(
+    private val onFatal: (ErrorCode, String) -> Unit,
+    private val onFirstMediaAccepted: () -> Unit,
+    private val onConnectionLost: (String) -> Unit,
+    private val onLog: (String) -> Unit
+) {
+    private data class Packet(val video: Boolean, val payload: ByteArray, val timestampMs: Long)
+
+    private var client: RtmpClient? = null
+    private var senderThread: Thread? = null
+    private val running = AtomicBoolean(false)
+    private val queue = LinkedBlockingQueue<Packet>(600)
+
+    val bytesSent = AtomicLong(0)
+    val packetsSent = AtomicLong(0)
+    val droppedPackets = AtomicLong(0)
+    val sendErrors = AtomicLong(0)
+    val videoPacketsSent = AtomicLong(0)
+    val audioPacketsSent = AtomicLong(0)
+    /** Highest sustained send rate actually measured on the socket (upload capacity estimate). */
+    @Volatile var peakSendBitrateBps: Long = 0; private set
+    val videoSendMeter = FpsMeter()
+    @Volatile var queueBytes: Long = 0; private set
+    @Volatile var currentBitrateBps: Long = 0; private set
+    @Volatile var firstMediaSent = false; private set
+    @Volatile var lastError: String? = null
+    @Volatile var diagnostics = RtmpDiagnostics(); private set
+
+    private var windowStartMs = 0L
+    private var windowBytes = 0L
+
+    val isConnected: Boolean get() = client?.connected == true
+    val isPublishing: Boolean get() = client?.isHealthy == true
+
+    /** Blocking: opens the socket and completes the RTMP publish handshake. */
+    fun connect(url: String, streamKey: String) {
+        closeInternal()
+        firstMediaSent = false
+        queue.clear()
+        val c = RtmpClient(
+            url = url,
+            streamKey = streamKey,
+            onStatus = { code ->
+                if (code == "NetConnection.Closed" || code.contains("Failed")) {
+                    onConnectionLost(code)
+                }
+            },
+            onLog = onLog,
+            onDiagnostics = { diagnostics = it }
+        )
+        c.connect()
+        client = c
+        running.set(true)
+        windowStartMs = System.currentTimeMillis()
+        windowBytes = 0
+        senderThread = Thread({ senderLoop() }, "RtmpSender").also { it.start() }
+    }
+
+    fun sendMetadata(width: Int, height: Int, fps: Int, bitrateKbps: Int, sampleRate: Int) {
+        runCatching { client?.sendMetadata(width, height, fps, bitrateKbps, sampleRate) }
+    }
+
+    fun enqueueVideo(payload: ByteArray, timestampMs: Long) = enqueue(Packet(true, payload, timestampMs))
+
+    fun enqueueAudio(payload: ByteArray, timestampMs: Long) = enqueue(Packet(false, payload, timestampMs))
+
+    private fun enqueue(packet: Packet) {
+        if (!running.get()) return
+        queueBytes += packet.payload.size
+        if (!queue.offer(packet)) {
+            // Network slower than the encoder. Audio is tiny and any gap in it is
+            // immediately audible as a crackle, so we only ever drop video here:
+            // remove the OLDEST VIDEO packet and keep every audio packet queued.
+            var freed = false
+            val it = queue.iterator()
+            while (it.hasNext()) {
+                val candidate = it.next()
+                if (candidate.video) {
+                    it.remove()
+                    queueBytes = (queueBytes - candidate.payload.size).coerceAtLeast(0)
+                    droppedPackets.incrementAndGet()
+                    freed = true
+                    break
+                }
+            }
+            if (!freed) {
+                // Queue is audio-only (should not happen): drop the oldest packet so
+                // the pipeline cannot deadlock, and count it honestly.
+                val dropped = queue.poll()
+                if (dropped != null) queueBytes = (queueBytes - dropped.payload.size).coerceAtLeast(0)
+                droppedPackets.incrementAndGet()
+            }
+            if (!queue.offer(packet)) {
+                queueBytes = (queueBytes - packet.payload.size).coerceAtLeast(0)
+                droppedPackets.incrementAndGet()
+            }
+        }
+    }
+
+    private fun senderLoop() {
+        try {
+            while (running.get()) {
+                val packet = queue.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                val c = client ?: break
+                if (packet.video) {
+                    c.sendVideo(packet.payload, packet.timestampMs)
+                    videoSendMeter.tick()
+                    videoPacketsSent.incrementAndGet()
+                } else {
+                    c.sendAudio(packet.payload, packet.timestampMs)
+                    audioPacketsSent.incrementAndGet()
+                }
+                queueBytes = (queueBytes - packet.payload.size).coerceAtLeast(0)
+
+                packetsSent.incrementAndGet()
+                bytesSent.addAndGet(packet.payload.size.toLong())
+                windowBytes += packet.payload.size.toLong()
+                val now = System.currentTimeMillis()
+                val elapsed = now - windowStartMs
+                if (elapsed >= 1000) {
+                    currentBitrateBps = windowBytes * 8 * 1000 / elapsed
+                    if (currentBitrateBps > peakSendBitrateBps) peakSendBitrateBps = currentBitrateBps
+                    windowStartMs = now
+                    windowBytes = 0
+                }
+                if (!firstMediaSent) {
+                    firstMediaSent = true
+                    onFirstMediaAccepted()
+                }
+            }
+        } catch (e: StreamException) {
+            lastError = e.message
+            sendErrors.incrementAndGet()
+            if (running.get()) onConnectionLost(e.message ?: "send failed")
+        } catch (t: Throwable) {
+            lastError = t.message
+            if (running.get()) onFatal(ErrorCode.STREAM_SEND_FAILED, t.message ?: "transport failure")
+        }
+    }
+
+    fun close() {
+        closeInternal()
+    }
+
+    private fun closeInternal() {
+        running.set(false)
+        senderThread?.join(1500)
+        senderThread = null
+        runCatching { client?.close() }
+        client = null
+        queue.clear()
+        currentBitrateBps = 0
+    }
+
+    fun queueDepth(): Int = queue.size
+}
