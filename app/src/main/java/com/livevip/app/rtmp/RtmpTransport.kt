@@ -82,11 +82,32 @@ class RtmpTransport(
         if (!running.get()) return
         queueBytes += packet.payload.size
         if (!queue.offer(packet)) {
-            // Network slower than the encoder: drop the oldest non-keyframe data.
-            val dropped = queue.poll()
-            if (dropped != null) queueBytes = (queueBytes - dropped.payload.size).coerceAtLeast(0)
-            droppedPackets.incrementAndGet()
-            queue.offer(packet)
+            // Network slower than the encoder. Audio is tiny and any gap in it is
+            // immediately audible as a crackle, so we only ever drop video here:
+            // remove the OLDEST VIDEO packet and keep every audio packet queued.
+            var freed = false
+            val it = queue.iterator()
+            while (it.hasNext()) {
+                val candidate = it.next()
+                if (candidate.video) {
+                    it.remove()
+                    queueBytes = (queueBytes - candidate.payload.size).coerceAtLeast(0)
+                    droppedPackets.incrementAndGet()
+                    freed = true
+                    break
+                }
+            }
+            if (!freed) {
+                // Queue is audio-only (should not happen): drop the oldest packet so
+                // the pipeline cannot deadlock, and count it honestly.
+                val dropped = queue.poll()
+                if (dropped != null) queueBytes = (queueBytes - dropped.payload.size).coerceAtLeast(0)
+                droppedPackets.incrementAndGet()
+            }
+            if (!queue.offer(packet)) {
+                queueBytes = (queueBytes - packet.payload.size).coerceAtLeast(0)
+                droppedPackets.incrementAndGet()
+            }
         }
     }
 
